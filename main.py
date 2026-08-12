@@ -20,6 +20,8 @@ CHAT_IDS = [
 TEKRAR_SURESI = 3 * 60 * 60
 TARAMA_SURESI = 5 * 60
 HIZLI_ON_TARAMA_SURESI = 60
+SESSIZ_HAVUZ_SURESI = 3 * 60  # Radar + giriş uygun adayı AI öncesi 3 dk sessiz izle
+SESSIZ_HAVUZ_MAX_SURE = 10 * 60  # bayat adayları havuzdan temizle
 HIZLI_FIYAT_ESIK = 0.40  # 60 sn fiyat ivmesi (%)
 HIZLI_HACIM_ESIK = 0.35  # ticker hacmindeki 60 sn pozitif artış (%)
 HIZLI_MAX_ADAY = 15       # API yükünü sınırlamak için dakikada en fazla tam analiz
@@ -5003,6 +5005,7 @@ def birlesik_piyasa_sinyalini_onayla(symbol):
 # coinleri 5 dakikalık genel taramayı beklemeden mevcut Radar analizine sokar.
 son_tam_tarama = 0.0
 on_tarama_onceki_ticker = {}
+sessiz_izleme_havuzu = {}
 
 def _ticker_float(veri, *alanlar):
     for alan in alanlar:
@@ -5046,7 +5049,7 @@ def hizli_on_tarama_adaylari(ticker, onceki):
 while True:
     try:
         print()
-        print("COIN RADAR V5.3")
+        print("COIN RADAR AI V5.4.1 | 60sn + 3dk sessiz havuz")
         print("--------------------------------")
 
         hedef_stop_kontrol()
@@ -5072,7 +5075,13 @@ while True:
             son_tam_tarama = simdi_tarama
             print("🔎 Tam piyasa taraması (5 dk)")
         else:
-            hizli_hedefler = {x[1] for x in hizli_adaylar}
+            # Hızlanan coinlere ek olarak 3 dk sessiz havuzdaki coinleri de her 60 sn yeniden değerlendir.
+            # Böylece ilk tetik kaybolsa bile 3 dakika sonunda güncel Radar + giriş + AI kontrolü yapılabilir.
+            simdi_havuz = time.time()
+            for _sym, _kayit in list(sessiz_izleme_havuzu.items()):
+                if simdi_havuz - float(_kayit.get("zaman", simdi_havuz)) > SESSIZ_HAVUZ_MAX_SURE:
+                    sessiz_izleme_havuzu.pop(_sym, None)
+            hizli_hedefler = {x[1] for x in hizli_adaylar} | set(sessiz_izleme_havuzu.keys())
             if hizli_adaylar:
                 ozet = ", ".join(
                     f"{sym}(fiyat %{fp:+.2f}, hacim %{vp:+.2f})"
@@ -5527,8 +5536,27 @@ while True:
                     )
                     continue
 
-                # BIRLESIK SISTEMIN IKINCI KILIDI:
-                # Radar + giris kalitesi geçse bile AI teknik motoru AL demiyorsa Telegram sessiz.
+                # V5.4.1: Radar + giriş kalitesini geçen aday önce 3 dk sessiz izleme havuzuna girer.
+                # Havuzdayken Telegram mesajı ve AI onayı yoktur; coin her 60 sn güncel Radar verisiyle yeniden değerlendirilir.
+                havuz_kaydi = sessiz_izleme_havuzu.get(symbol)
+                if havuz_kaydi is None:
+                    sessiz_izleme_havuzu[symbol] = {
+                        "zaman": simdi,
+                        "ilk_durum": durum,
+                        "ilk_guc": a.get("guc_skoru", 0),
+                        "ilk_giris": a.get("giris_kalitesi", 0),
+                    }
+                    print(f"🤫 Sessiz havuza alındı: {symbol} | {durum} | 3 dk izlenecek")
+                    continue
+
+                havuz_gecen = simdi - float(havuz_kaydi.get("zaman", simdi))
+                if havuz_gecen < SESSIZ_HAVUZ_SURESI:
+                    kalan_sn = max(0, int(SESSIZ_HAVUZ_SURESI - havuz_gecen))
+                    print(f"🤫 Sessiz izleme: {symbol} | {durum} | kalan {kalan_sn} sn")
+                    continue
+
+                # 3 dakika sonunda coin HALA Radar kategorisi + giriş kalitesi kapılarından geçmiş durumda.
+                # Şimdi ikinci kilit olan gerçek teknik AI teyidi çalışır.
                 if not birlesik_ai_onayla(a):
                     teknik = a.get("teknik") or {}
                     print(
@@ -5536,10 +5564,12 @@ while True:
                         f"AI {a.get('ai_skoru', 0)}/100 | RSI {teknik.get('rsi', 'NA')} | "
                         f"ADX {teknik.get('adx', 'NA')}"
                     )
+                    sessiz_izleme_havuzu.pop(symbol, None)
                     continue
 
+                sessiz_izleme_havuzu.pop(symbol, None)
                 print(
-                    f"✅ BIRLESIK ONAY: {symbol} | {durum} | AI {a.get('ai_skoru', 0)}/100"
+                    f"✅ BIRLESIK ONAY: {symbol} | {durum} | 3dk havuz tamam | AI {a.get('ai_skoru', 0)}/100"
                 )
                 birlesik_piyasa_sinyalini_onayla(symbol)
 
@@ -5695,4 +5725,3 @@ while True:
     except Exception as e:
         print("Bot genel hata:", e)
         time.sleep(30)
-
