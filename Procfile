@@ -1,1 +1,1 @@
-worker: python btcturk_sinyal.py
+worker: python main.py
