@@ -5049,7 +5049,7 @@ def hizli_on_tarama_adaylari(ticker, onceki):
 while True:
     try:
         print()
-        print("COIN RADAR AI V5.4.3 | 60sn + 3dk sessiz havuz → AI")
+        print("COIN RADAR AI V5.4.4 | Radar → 3dk AI takip → AL/RED")
         print("--------------------------------")
 
         hedef_stop_kontrol()
@@ -5567,15 +5567,67 @@ while True:
                     havuz_gecen = simdi - float(havuz_kaydi.get("zaman", simdi))
                     ilk_durum = havuz_kaydi.get("ilk_durum", durum)
 
+                    # V5.4.4: Radar sinyali geldikten sonra coin 3 dk boyunca HER 60 sn
+                    # AI teknik motoruyla yeniden ölçülür. Böylece tek bir 1dk geri çekilmesi
+                    # (ARXTRY örneğindeki gibi) nihai kararı tek başına belirlemez.
+                    takip_adayi = dict(a)
+                    takip_adayi["durum"] = ilk_durum
+                    birlesik_ai_onayla(takip_adayi)
+
+                    ai_skor_now = float(takip_adayi.get("ai_skoru", 0) or 0)
+                    ai_karar_now = takip_adayi.get("karar", "🟡 BEKLE")
+                    teknik_now = takip_adayi.get("teknik") or {}
+
+                    gozlemler = havuz_kaydi.setdefault("ai_gozlemler", [])
+                    gozlemler.append({
+                        "zaman": simdi,
+                        "ai_skoru": ai_skor_now,
+                        "karar": ai_karar_now,
+                        "rsi": teknik_now.get("rsi"),
+                        "adx": teknik_now.get("adx"),
+                        "macd_hist": teknik_now.get("macd_hist"),
+                    })
+                    # Aynı coin için gereksiz büyümeyi önle.
+                    havuz_kaydi["ai_gozlemler"] = gozlemler[-4:]
+
                     if havuz_gecen < SESSIZ_HAVUZ_SURESI:
                         kalan_sn = max(0, int(SESSIZ_HAVUZ_SURESI - havuz_gecen))
-                        print(f"🤫 Sessiz izleme: {symbol} | {ilk_durum} | kalan {kalan_sn} sn")
+                        print(
+                            f"👀 AI takip: {symbol} | {ilk_durum} | "
+                            f"{ai_karar_now} {round(ai_skor_now,1)}/100 | kalan {kalan_sn} sn"
+                        )
                         continue
 
                     # İlk Radar onayındaki kategori korunur; ikinci kez Radar/giriş filtresi uygulanmaz.
                     durum = ilk_durum
                     a["durum"] = ilk_durum
-                    print(f"⏱️ {symbol} 3 dk izlemeyi tamamladı → AI kontrolü | ilk Radar: {ilk_durum}")
+
+                    skorlar = [float(x.get("ai_skoru", 0) or 0) for x in havuz_kaydi.get("ai_gozlemler", [])]
+                    kararlar = [x.get("karar") for x in havuz_kaydi.get("ai_gozlemler", [])]
+                    al_sayisi = sum(1 for x in kararlar if x == "🟢 AL")
+                    ilk_skor = skorlar[0] if skorlar else ai_skor_now
+                    son_skor = skorlar[-1] if skorlar else ai_skor_now
+                    max_skor = max(skorlar) if skorlar else ai_skor_now
+
+                    # Nihai mantık:
+                    # - Son ölçüm AL ise güç korunuyor.
+                    # - Son ölçüm AL değilse bile 3 dk içinde AL görülmüş ve skor ilk ölçüme
+                    #   göre belirgin toparlanmışsa tek kötü 1dk ölçümü yüzünden aday kaybolmaz.
+                    toparlandi = (
+                        al_sayisi >= 1
+                        and son_skor >= ilk_skor + 5
+                        and son_skor >= max_skor - 8
+                    )
+                    havuz_kaydi["takip_toparlandi"] = bool(toparlandi)
+                    havuz_kaydi["takip_al_sayisi"] = al_sayisi
+                    havuz_kaydi["takip_ilk_skor"] = round(ilk_skor, 1)
+                    havuz_kaydi["takip_son_skor"] = round(son_skor, 1)
+
+                    print(
+                        f"⏱️ {symbol} 3 dk AI takip tamam | "
+                        f"ilk {round(ilk_skor,1)} → son {round(son_skor,1)} | "
+                        f"AL teyidi {al_sayisi}/{len(skorlar)}"
+                    )
 
                 else:
                     # Havuza ilk girişte mevcut Radar kategori ve giriş kalitesi şartları aynen korunur.
@@ -5599,20 +5651,32 @@ while True:
                         # V5.4.3: Aday 3 dk sonra Radar listesinde görünmese bile
                         # AI aşamasına ulaşabilsin diye ilk onay anının tam snapshot'ını sakla.
                         "aday": dict(a),
+                        "ai_gozlemler": [],
                     }
                     print(f"🤫 Sessiz havuza alındı: {symbol} | {durum} | 3 dk izlenecek")
                     continue
 
-                # 3 dk sonunda tek ikinci kilit: gerçek teknik AI teyidi.
-                if not birlesik_ai_onayla(a):
+                # V5.4.4: Nihai karar tek anlık AI ölçümünden değil, 3 dakikalık AI takipten çıkar.
+                nihai_ai_al = birlesik_ai_onayla(a)
+                havuz_kaydi = sessiz_izleme_havuzu.get(symbol) or {}
+                takip_toparlandi = bool(havuz_kaydi.get("takip_toparlandi", False))
+
+                if not (nihai_ai_al or takip_toparlandi):
                     teknik = a.get("teknik") or {}
                     print(
-                        f"🤖 {symbol} AI RED | {a.get('ai_skoru', 0)}/100 | "
-                        f"Karar {a.get('karar', '🟡 BEKLE')} | RSI {teknik.get('rsi', 'NA')} | "
-                        f"ADX {teknik.get('adx', 'NA')} | MACD {'✅' if (teknik.get('macd_hist') is not None and teknik.get('macd_hist') > 0) else '❌'}"
+                        f"🔴 {symbol} AI RED | 3dk takipte güç teyidi yok | "
+                        f"AI {a.get('ai_skoru', 0)}/100 | Karar {a.get('karar', '🟡 BEKLE')} | "
+                        f"ilk→son {havuz_kaydi.get('takip_ilk_skor','?')}→{havuz_kaydi.get('takip_son_skor','?')} | "
+                        f"RSI {teknik.get('rsi', 'NA')} | ADX {teknik.get('adx', 'NA')}"
                     )
                     sessiz_izleme_havuzu.pop(symbol, None)
                     continue
+
+                if takip_toparlandi and not nihai_ai_al:
+                    # Takip boyunca yeniden güçlenen aday: tek son mum zayıflığı yüzünden kaçırma.
+                    a["ai_onayli"] = True
+                    a["karar"] = "🟢 AL"
+                    a.setdefault("nedenler", []).insert(0, "3 dk takipte güç yeniden toplandı")
 
                 sessiz_izleme_havuzu.pop(symbol, None)
                 print(
