@@ -1846,27 +1846,7 @@ def kategori_belirle(symbol, genel_skor, kalite_skoru, hacim_kat, haber_skoru, b
             return "📊 TRADER HACİM", "15x+ hacim + BTC gücü + zirve teyidi"
         return "📊 TRADER HACİM", "15x+ hacim + BTC gücü"
 
-    # 4) 🚀 ROKET ADAYI - V5.4.7 ERKEN HAZIRLIK KAPISI
-    # 24 saat değişimi karar vermiyor.
-    # Amaç: Coin 1-2 saat hazırlanırken, 3. saate doğru hızlanmayı daha erken görmek.
-    # 3s değişimin 1s değişimden belirgin yüksek olması, önceki 2 saatte de
-    # birikim/hazırlık olduğunu gösteren temel teyittir.
-    erken_roket_hazirligi = (
-        guc_skoru >= 55
-        and kalite_skoru >= 8
-        and hacim_kat >= 3.5
-        and 0.30 <= degisim1 <= 2.75
-        and 0.80 <= degisim3 <= 4.0
-        and (degisim3 - degisim1) >= 0.40
-        and btcden_guclu
-        and btc_guc_skoru >= 4
-        and (haber_skoru > 0 or lider_skoru >= 5 or guclenme_bonus > 0)
-    )
-    if erken_roket_hazirligi:
-        return "🚀 Roket Adayı", "1s→3s hazırlık güçleniyor"
-
-    # 5) 🚀 ROKET ADAYI - ESKİ TANIDIĞIMIZ GÜÇLÜ KAPI
-    # Bu kapı aynen korunuyor; erken kapı kaçırırsa eski sistem yine çalışır.
+    # 4) 🚀 ROKET ADAYI - haberli veya sessiz güçlü aday
     if (
         guc_skoru >= 62
         and kalite_skoru >= 8
@@ -5069,7 +5049,7 @@ def hizli_on_tarama_adaylari(ticker, onceki):
 while True:
     try:
         print()
-        print("COIN RADAR AI V5.4.7 | YILDIZLI RADAR + 1s/3s ERKEN ROKET → 3dk AI")
+        print("COIN RADAR AI V5.4.4 | Radar → 3dk AI takip → AL/RED")
         print("--------------------------------")
 
         hedef_stop_kontrol()
@@ -5657,17 +5637,11 @@ while True:
 
                     if not a.get("giris_uygun", False):
                         neden = " • ".join(a.get("giris_riskleri", [])[:3]) or "giriş kalitesi yetersiz"
-                        if durum == "🚀 Roket Adayı":
-                            print(
-                                f"🌱 Erken Roket giriş riski: {symbol} | "
-                                f"Giriş {a.get('giris_kalitesi', 0)}/100 | {neden} → 3 dk AI takip"
-                            )
-                        else:
-                            print(
-                                f"Giriş filtresi: {symbol} | {durum} | "
-                                f"Giriş {a.get('giris_kalitesi', 0)}/100 < {GIRIS_KALITESI_MIN} | {neden}"
-                            )
-                            continue
+                        print(
+                            f"Giriş filtresi: {symbol} | {durum} | "
+                            f"Giriş {a.get('giris_kalitesi', 0)}/100 < {GIRIS_KALITESI_MIN} | {neden}"
+                        )
+                        continue
 
                     sessiz_izleme_havuzu[symbol] = {
                         "zaman": simdi,
@@ -5810,19 +5784,9 @@ while True:
                         print("Seviye atladı ama Telegram'a gönderilmedi:")
                         print(mesaj_yukselis)
 
-                    satir = ""
-                    if sira > 1:
-                        coin_baslik_map = {
-                            "📊 TRADER HACİM": "TRADER HACİM",
-                            "🚀 Roket Adayı": "ROKET ADAYI",
-                            "🔥 Elit Roket": "ELİT ROKET",
-                            "⭐ Yıldız": "YILDIZ"
-                        }
-                        coin_sinyal_basligi = coin_baslik_map.get(a.get("durum"), "SİNYAL")
-                        coin_ikon = a.get("durum", "🚀").split()[0]
-                        satir += f"\n{coin_ikon} {symbol} | {coin_sinyal_basligi}\n\n"
-
-                    satir += f"{ortak_sinyal_ozeti_olustur(a)}\n\n"
+                    satir = (
+                        f"{ortak_sinyal_ozeti_olustur(a)}\n\n"
+                    )
 
                     if a["durum_degisti"]:
                         satir += f"Geçiş: {a['eski_durum']} → {a['durum']}\n\n"
