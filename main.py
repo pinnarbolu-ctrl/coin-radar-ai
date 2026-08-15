@@ -5049,7 +5049,7 @@ def hizli_on_tarama_adaylari(ticker, onceki):
 while True:
     try:
         print()
-        print("COIN RADAR AI V5.4.1 | 60sn + 3dk sessiz havuz")
+        print("COIN RADAR AI V5.4.2 | 60sn + 3dk sessiz havuz → AI")
         print("--------------------------------")
 
         hedef_stop_kontrol()
@@ -5523,23 +5523,40 @@ while True:
                     "durum": durum
                 }
 
-                if durum not in TELEGRAM_KATEGORILERI:
-                    print(f"Arka plan: {symbol} | {durum} | Güç: {a.get('guc_skoru', 0)}/100 | Hacim: {round(a['hacim'], 2)}x")
-                    continue
-
-                # Ana değişiklik: Roket/Elit/Yıldız güçlü olsa bile giriş kalitesi düşükse mesaj yok.
-                if not a.get("giris_uygun", False):
-                    neden = " • ".join(a.get("giris_riskleri", [])[:3]) or "giriş kalitesi yetersiz"
-                    print(
-                        f"Giriş filtresi: {symbol} | {durum} | "
-                        f"Giriş {a.get('giris_kalitesi', 0)}/100 < {GIRIS_KALITESI_MIN} | {neden}"
-                    )
-                    continue
-
-                # V5.4.1: Radar + giriş kalitesini geçen aday önce 3 dk sessiz izleme havuzuna girer.
-                # Havuzdayken Telegram mesajı ve AI onayı yoktur; coin her 60 sn güncel Radar verisiyle yeniden değerlendirilir.
+                # V5.4.2: Sessiz havuz ARTIK ikinci bir Radar filtresi değildir.
+                # Coin ilk kez Radar + giriş kalitesi kapısını geçtiğinde 3 dk havuza alınır.
+                # Havuzdaki coin 3 dk boyunca kategori/giriş şartlarını tekrar geçmek zorunda değildir.
+                # Süre bitince güncel teknik verilerle doğrudan AI teyidine gider.
                 havuz_kaydi = sessiz_izleme_havuzu.get(symbol)
-                if havuz_kaydi is None:
+
+                if havuz_kaydi is not None:
+                    havuz_gecen = simdi - float(havuz_kaydi.get("zaman", simdi))
+                    ilk_durum = havuz_kaydi.get("ilk_durum", durum)
+
+                    if havuz_gecen < SESSIZ_HAVUZ_SURESI:
+                        kalan_sn = max(0, int(SESSIZ_HAVUZ_SURESI - havuz_gecen))
+                        print(f"🤫 Sessiz izleme: {symbol} | {ilk_durum} | kalan {kalan_sn} sn")
+                        continue
+
+                    # İlk Radar onayındaki kategori korunur; ikinci kez Radar/giriş filtresi uygulanmaz.
+                    durum = ilk_durum
+                    a["durum"] = ilk_durum
+                    print(f"⏱️ {symbol} 3 dk izlemeyi tamamladı → AI kontrolü | ilk Radar: {ilk_durum}")
+
+                else:
+                    # Havuza ilk girişte mevcut Radar kategori ve giriş kalitesi şartları aynen korunur.
+                    if durum not in TELEGRAM_KATEGORILERI:
+                        print(f"Arka plan: {symbol} | {durum} | Güç: {a.get('guc_skoru', 0)}/100 | Hacim: {round(a['hacim'], 2)}x")
+                        continue
+
+                    if not a.get("giris_uygun", False):
+                        neden = " • ".join(a.get("giris_riskleri", [])[:3]) or "giriş kalitesi yetersiz"
+                        print(
+                            f"Giriş filtresi: {symbol} | {durum} | "
+                            f"Giriş {a.get('giris_kalitesi', 0)}/100 < {GIRIS_KALITESI_MIN} | {neden}"
+                        )
+                        continue
+
                     sessiz_izleme_havuzu[symbol] = {
                         "zaman": simdi,
                         "ilk_durum": durum,
@@ -5549,20 +5566,13 @@ while True:
                     print(f"🤫 Sessiz havuza alındı: {symbol} | {durum} | 3 dk izlenecek")
                     continue
 
-                havuz_gecen = simdi - float(havuz_kaydi.get("zaman", simdi))
-                if havuz_gecen < SESSIZ_HAVUZ_SURESI:
-                    kalan_sn = max(0, int(SESSIZ_HAVUZ_SURESI - havuz_gecen))
-                    print(f"🤫 Sessiz izleme: {symbol} | {durum} | kalan {kalan_sn} sn")
-                    continue
-
-                # 3 dakika sonunda coin HALA Radar kategorisi + giriş kalitesi kapılarından geçmiş durumda.
-                # Şimdi ikinci kilit olan gerçek teknik AI teyidi çalışır.
+                # 3 dk sonunda tek ikinci kilit: gerçek teknik AI teyidi.
                 if not birlesik_ai_onayla(a):
                     teknik = a.get("teknik") or {}
                     print(
-                        f"AI onayı yok: {symbol} | {durum} | {a.get('karar', '🟡 BEKLE')} | "
-                        f"AI {a.get('ai_skoru', 0)}/100 | RSI {teknik.get('rsi', 'NA')} | "
-                        f"ADX {teknik.get('adx', 'NA')}"
+                        f"🤖 {symbol} AI RED | {a.get('ai_skoru', 0)}/100 | "
+                        f"Karar {a.get('karar', '🟡 BEKLE')} | RSI {teknik.get('rsi', 'NA')} | "
+                        f"ADX {teknik.get('adx', 'NA')} | MACD {'✅' if teknik.get('macd_ok') else '❌'}"
                     )
                     sessiz_izleme_havuzu.pop(symbol, None)
                     continue
