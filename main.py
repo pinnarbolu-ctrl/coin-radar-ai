@@ -5049,7 +5049,7 @@ def hizli_on_tarama_adaylari(ticker, onceki):
 while True:
     try:
         print()
-        print("COIN RADAR AI V5.4.2 | 60sn + 3dk sessiz havuz → AI")
+        print("COIN RADAR AI V5.4.3 | 60sn + 3dk sessiz havuz → AI")
         print("--------------------------------")
 
         hedef_stop_kontrol()
@@ -5436,6 +5436,40 @@ while True:
                 print("Coin hata:", e)
                 continue
 
+        # === V5.4.3 SESSIZ HAVUZ STATE FIX ===
+        # Havuz, o anki Radar aday listesinden BAĞIMSIZ yaşar. Bir coin ilk Radar + giriş
+        # onayını aldıktan sonra 3 dk sonunda tekrar Radar adayı olmasa bile AI kontrolüne gider.
+        # Böylece "Şu an aday yok" dalı havuzdaki adayın AI'ya ulaşmasını engellemez.
+        simdi_havuz_ai = time.time()
+        mevcut_aday_sembolleri = {x.get("symbol") for x in adaylar}
+        ticker_fiyatlari = {
+            x.get("pair"): _ticker_float(x, "last", "lastPrice", "price")
+            for x in ticker if x.get("pair")
+        }
+        for _sym, _kayit in list(sessiz_izleme_havuzu.items()):
+            _baslangic = float(_kayit.get("zaman", simdi_havuz_ai))
+            _gecen = simdi_havuz_ai - _baslangic
+            if _gecen < SESSIZ_HAVUZ_SURESI or _sym in mevcut_aday_sembolleri:
+                continue
+
+            _snapshot = dict(_kayit.get("aday") or {})
+            if not _snapshot:
+                print(f"⚠️ Havuz snapshot yok: {_sym}; kayıt temizlendi")
+                sessiz_izleme_havuzu.pop(_sym, None)
+                continue
+
+            # AI teknik göstergeleri zaten güncel mumlardan hesaplar. Fiyatı da mümkünse
+            # güncel ticker ile yenile; ilk Radar sınıfı ve Radar özellikleri snapshot'tan gelir.
+            _guncel_fiyat = ticker_fiyatlari.get(_sym, 0)
+            if _guncel_fiyat and _guncel_fiyat > 0:
+                _snapshot["fiyat"] = _guncel_fiyat
+            _snapshot["durum"] = _kayit.get("ilk_durum", _snapshot.get("durum", ""))
+            _snapshot["_havuzdan_zorunlu_ai"] = True
+            adaylar.append(_snapshot)
+            mevcut_aday_sembolleri.add(_sym)
+            print(f"⏱️ {_sym} havuz süresi doldu; Radar listesinden bağımsız AI kuyruğuna alındı")
+        # === /V5.4.3 SESSIZ HAVUZ STATE FIX ===
+
         if len(adaylar) == 0:
             print("Şu an aday yok.")
 
@@ -5562,6 +5596,9 @@ while True:
                         "ilk_durum": durum,
                         "ilk_guc": a.get("guc_skoru", 0),
                         "ilk_giris": a.get("giris_kalitesi", 0),
+                        # V5.4.3: Aday 3 dk sonra Radar listesinde görünmese bile
+                        # AI aşamasına ulaşabilsin diye ilk onay anının tam snapshot'ını sakla.
+                        "aday": dict(a),
                     }
                     print(f"🤫 Sessiz havuza alındı: {symbol} | {durum} | 3 dk izlenecek")
                     continue
@@ -5572,7 +5609,7 @@ while True:
                     print(
                         f"🤖 {symbol} AI RED | {a.get('ai_skoru', 0)}/100 | "
                         f"Karar {a.get('karar', '🟡 BEKLE')} | RSI {teknik.get('rsi', 'NA')} | "
-                        f"ADX {teknik.get('adx', 'NA')} | MACD {'✅' if teknik.get('macd_ok') else '❌'}"
+                        f"ADX {teknik.get('adx', 'NA')} | MACD {'✅' if (teknik.get('macd_hist') is not None and teknik.get('macd_hist') > 0) else '❌'}"
                     )
                     sessiz_izleme_havuzu.pop(symbol, None)
                     continue
