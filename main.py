@@ -782,7 +782,7 @@ def h_karar_hesapla(aday):
 while True:
     try:
         print()
-        print("RADAR + AL BİRLEŞİK | V5.4.8 | yalnızca ortak AL")
+        print("RADAR + AL BİRLEŞİK | V5.4.9 | 4/5 ortak teknik onay")
         print("--------------------------------")
 
         btc_d = btc_degisimleri()
@@ -1113,8 +1113,50 @@ while True:
             entry = entry_quality_hesapla(a)
             a.update(entry)
 
-            # Teknik motor AL dese bile giriş kalitesi zayıfsa Telegram'a AL gönderme.
-            if "AL" in a.get("karar", "") and not a.get("entry_uygun", False):
+            # --------------------------------------------------
+            # V5.4.9 RADAR + AL ORTAK ONAY
+            # Radar zaten aday kalitesini seçti. Burada ikinci kez aşırı sert
+            # AI>=85/ADX>=30 kapısı kurmuyoruz.
+            #
+            # 5 kapı:
+            #   1) EMA20 > EMA50 ve fiyat EMA20 üstünde
+            #   2) RSI 45-75
+            #   3) MACD histogram pozitif
+            #   4) ADX >= 25
+            #   5) Giriş Kalitesi >= 68
+            #
+            # En az 4/5 geçerse 🟢 AL.
+            # --------------------------------------------------
+            teknik_ortak = a.get("teknik") or {}
+            fiyat_ortak = a.get("fiyat", 0)
+
+            ema20_o = teknik_ortak.get("ema20")
+            ema50_o = teknik_ortak.get("ema50")
+            rsi_o = teknik_ortak.get("rsi")
+            macd_o = teknik_ortak.get("macd_hist")
+            adx_o = teknik_ortak.get("adx")
+
+            ortak_onaylar = {
+                "EMA": (
+                    ema20_o is not None
+                    and ema50_o is not None
+                    and ema20_o > ema50_o
+                    and fiyat_ortak > ema20_o
+                ),
+                "RSI": rsi_o is not None and 45 <= rsi_o <= 75,
+                "MACD": macd_o is not None and macd_o > 0,
+                "ADX": adx_o is not None and adx_o >= 25,
+                "Giriş": a.get("entry_skoru", 0) >= 68,
+            }
+
+            ortak_onay_sayisi = sum(1 for v in ortak_onaylar.values() if v)
+            a["ortak_onaylar"] = ortak_onaylar
+            a["ortak_onay_sayisi"] = ortak_onay_sayisi
+
+            # AI skoru bilgi olarak kalır; artık zorunlu veto değildir.
+            if ortak_onay_sayisi >= 4:
+                a["karar"] = "🟢 AL"
+            else:
                 a["karar"] = "🟡 BEKLE"
 
             # --------------------------------------------------
@@ -1164,6 +1206,7 @@ while True:
                 macd_txt = "NA" if macd_hist is None else f"{macd_hist:.5f}"
 
                 print(
+                    f"[ORTAK ONAY {a.get('ortak_onay_sayisi', 0)}/5] "
                     f"[AL DEBUG] {a['symbol']} | {a.get('karar', '🟡 BEKLE')} | "
                     f"{kategori} | "
                     f"EMA {durum(ema_ok)} | "
@@ -1224,13 +1267,23 @@ while True:
                     ema_yon = "Yukarı" if teknik["ema20"] > teknik["ema50"] else "Aşağı"
                     macd_yon = "Pozitif" if teknik["macd_hist"] is not None and teknik["macd_hist"] > 0 else "Negatif"
                     nedenler = list(a.get("nedenler", []))
-                    if a.get("erken_roket_hazirligi"):
-                        nedenler.insert(0, "1s→3s hazırlık güçleniyor")
-                    neden = " • ".join(nedenler[:5])
+                    ortak = a.get("ortak_onaylar", {})
+                    gecen = [k for k, v in ortak.items() if v]
+                    eksik = [k for k, v in ortak.items() if not v]
+
+                    neden_parcalari = []
+                    if gecen:
+                        neden_parcalari.append("Geçen: " + ", ".join(gecen))
+                    if eksik:
+                        neden_parcalari.append("Eksik: " + ", ".join(eksik))
+                    if nedenler:
+                        neden_parcalari.append(" • ".join(nedenler[:2]))
+
+                    neden = " | ".join(neden_parcalari)
 
                     mesaj += (
                         f"🟢 AL | {a['symbol']} | {a.get('radar_kategori', '')}\n"
-                        f"Radar: {a['radar_skoru']}/100 | AI: {a.get('ai_skoru', 0)}/100 | Giriş: {a.get('entry_skoru', 0)}/100\n"
+                        f"Radar: {a['radar_skoru']}/100 | AI: {a.get('ai_skoru', 0)}/100 | Giriş: {a.get('entry_skoru', 0)}/100 | Onay: {a.get('ortak_onay_sayisi', 0)}/5\n"
                         f"Fiyat: {round(a['fiyat'], 4)} | Hacim: {a['hacim']}x | Risk: {a.get('risk', 'Bilinmiyor')}\n"
                         f"1s: %{a['degisim1']} | 3s: %{a['degisim3']}\n"
                         f"EMA: {ema_yon} | RSI: {teknik['rsi']} | ADX: {teknik['adx']} | MACD: {macd_yon}\n"
