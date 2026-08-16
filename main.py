@@ -782,7 +782,7 @@ def h_karar_hesapla(aday):
 while True:
     try:
         print()
-        print("RADAR + AL BİRLEŞİK | V5.4.9 | 4/5 ortak teknik onay")
+        print("RADAR + AL BİRLEŞİK | V5.4.10 | 4/5 + güçlü 3/5")
         print("--------------------------------")
 
         btc_d = btc_degisimleri()
@@ -1153,8 +1153,22 @@ while True:
             a["ortak_onaylar"] = ortak_onaylar
             a["ortak_onay_sayisi"] = ortak_onay_sayisi
 
-            # AI skoru bilgi olarak kalır; artık zorunlu veto değildir.
-            if ortak_onay_sayisi >= 4:
+            # V5.4.10 karar:
+            # 1) Normal yol: 4/5 veya 5/5 doğrudan AL.
+            # 2) Güçlü 3/5 istisnası: AI >= 85 VE ADX >= 25 ise AL.
+            #    Böylece MELANIA gibi güçlü aday kaçmaz;
+            #    düşük ADX / düşük AI profilleri (örn. TRUMP tipi) geçmez.
+            ai_skoru_o = a.get("ai_skoru", 0)
+            guclu_3_5 = (
+                ortak_onay_sayisi == 3
+                and ai_skoru_o >= 85
+                and adx_o is not None
+                and adx_o >= 25
+            )
+
+            a["guclu_3_5"] = guclu_3_5
+
+            if ortak_onay_sayisi >= 4 or guclu_3_5:
                 a["karar"] = "🟢 AL"
             else:
                 a["karar"] = "🟡 BEKLE"
@@ -1283,7 +1297,8 @@ while True:
 
                     mesaj += (
                         f"🟢 AL | {a['symbol']} | {a.get('radar_kategori', '')}\n"
-                        f"Radar: {a['radar_skoru']}/100 | AI: {a.get('ai_skoru', 0)}/100 | Giriş: {a.get('entry_skoru', 0)}/100 | Onay: {a.get('ortak_onay_sayisi', 0)}/5\n"
+                        f"Radar: {a['radar_skoru']}/100 | AI: {a.get('ai_skoru', 0)}/100 | Giriş: {a.get('entry_skoru', 0)}/100 | Onay: {a.get('ortak_onay_sayisi', 0)}/5"
+                        f"{' ⭐ Güçlü 3/5' if a.get('guclu_3_5') else ''}\n"
                         f"Fiyat: {round(a['fiyat'], 4)} | Hacim: {a['hacim']}x | Risk: {a.get('risk', 'Bilinmiyor')}\n"
                         f"1s: %{a['degisim1']} | 3s: %{a['degisim3']}\n"
                         f"EMA: {ema_yon} | RSI: {teknik['rsi']} | ADX: {teknik['adx']} | MACD: {macd_yon}\n"
