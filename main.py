@@ -1105,12 +1105,24 @@ def h_karar_hesapla(aday):
     rsi_temiz = rsi is not None and 48 <= rsi <= 75
     rsi_kabul = rsi is not None and 45 <= rsi <= 75
 
+    # ERA düzeltmesi: RSI 75-80 güçlü trendde otomatik BEKLE değildir.
+    # Yalnız AI, EMA, MACD ve ADX birlikte çok güçlüyse istisna açılır.
+    yuksek_rsi_trend = (
+        rsi is not None
+        and 75 < rsi <= 80
+        and ema_yukari
+        and macd_pozitif
+        and adx is not None
+        and adx >= 30
+        and skor >= 90
+    )
+
     # Normal Radar adayında artık daha sıkı teknik teyit:
     # EMA yukarı + sağlıklı RSI + güçlü ADX + pozitif MACD + yüksek AI skoru.
     normal_al = (
         not aday.get("erken_aday", False)
         and ema_yukari
-        and rsi_temiz
+        and (rsi_temiz or yuksek_rsi_trend)
         and macd_pozitif
         and adx is not None
         and adx >= 27
@@ -1123,7 +1135,7 @@ def h_karar_hesapla(aday):
         "Elit" in kategori
         and radar >= 82
         and ema_yukari
-        and rsi_kabul
+        and (rsi_kabul or yuksek_rsi_trend)
         and macd_pozitif
         and adx is not None
         and adx >= 28
@@ -1668,7 +1680,17 @@ while True:
                     adx_ok = adx is not None and adx >= 30
                     skor_ok = ai_skor >= 80
                 elif "Elit" in kategori:
-                    rsi_ok = rsi is not None and 45 <= rsi <= 75
+                    rsi_ok = rsi is not None and (
+                        45 <= rsi <= 75
+                        or (
+                            75 < rsi <= 80
+                            and ema_ok
+                            and macd_ok
+                            and adx is not None
+                            and adx >= 30
+                            and ai_skor >= 90
+                        )
+                    )
                     adx_ok = adx is not None and adx >= 28
                     skor_ok = ai_skor >= 85
                 elif "Yıldız" in kategori:
@@ -1678,7 +1700,17 @@ while True:
                     adx_ok = adx is not None and adx >= 30
                     skor_ok = ai_skor >= 85
                 else:
-                    rsi_ok = rsi is not None and 48 <= rsi <= 75
+                    rsi_ok = rsi is not None and (
+                        48 <= rsi <= 75
+                        or (
+                            75 < rsi <= 80
+                            and ema_ok
+                            and macd_ok
+                            and adx is not None
+                            and adx >= 30
+                            and ai_skor >= 90
+                        )
+                    )
                     adx_ok = adx is not None and adx >= 27
                     skor_ok = ai_skor >= 80
 
