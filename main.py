@@ -1,5 +1,5 @@
 # ==========================================
-# AI COIN ASSISTANT - V8 | POTANSIYEL 65+ + %4/%7 KAR TAKIBI
+# AI COIN ASSISTANT - V9 | ILK AL GERCEK PERFORMANS TAKIBI
 # Taban: main (21).py
 # 21 sadeligi + 13 AL/SAT/Kar Koru + 1-3-5-10 dk erken yakalama
 # Giris/Devam skorları sadece bilgi, AL için veto DEGIL
@@ -12,6 +12,7 @@
 import os
 import time
 import json
+from datetime import datetime, timezone, timedelta
 import requests
 import feedparser
 
@@ -46,6 +47,13 @@ KAR_KORU_ORAN = 40
 ILK_ZARAR_KES = -0.8
 TEPE_GERI_VERME = -1.4
 MIN_KAR_KORUMA = 2.5
+
+# İlk AL performans ölçümü
+ILK_AL_TAKIP_SURESI = 3 * 60 * 60   # 3 saat
+RAPOR_SAATI = 21                    # Türkiye saati
+LOCAL_TZ = timezone(timedelta(hours=3))
+ILK_AL_SONUCLAR = []
+SON_PERFORMANS_RAPOR_TARIHI = None
 
 
 
@@ -334,6 +342,10 @@ def al_takip_baslat(aday):
     AL_TAKIP[symbol] = {
         "aktif": True,
         "giris": fiyat,
+        "baslangic_ts": time.time(),
+        "tepe_fiyat": fiyat,
+        "dip_fiyat": fiyat,
+        "son_fiyat": fiyat,
         "kar4_bildirildi": False,
         "kar7_bildirildi": False,
 
@@ -392,6 +404,14 @@ def al_takip_guncelle(ticker):
         getiri = _pct(fiyat, giris)
         snap = p.get("snapshot") or {}
 
+        # İlk AL'dan sonraki gerçek performansı sürekli ölç.
+        p["son_fiyat"] = fiyat
+        p["tepe_fiyat"] = max(float(p.get("tepe_fiyat", giris)), fiyat)
+        p["dip_fiyat"] = min(float(p.get("dip_fiyat", giris)), fiyat)
+
+        max_getiri = _pct(p["tepe_fiyat"], giris)
+        min_getiri = _pct(p["dip_fiyat"], giris)
+
         if (not p.get("kar4_bildirildi")) and getiri >= KAR4_BILDIR_ESIK:
             p["kar4_bildirildi"] = True
 
@@ -431,6 +451,29 @@ def al_takip_guncelle(ticker):
             )
             print(mesaj)
             telegram_gonder(mesaj)
+
+        # 3 saat dolunca ilk AL performansını tamamla.
+        if time.time() - float(p.get("baslangic_ts", time.time())) >= ILK_AL_TAKIP_SURESI:
+            sonuc = {
+                "symbol": symbol,
+                "giris": round(giris, 8),
+                "son_fiyat": round(fiyat, 8),
+                "max_getiri": round(max_getiri, 2),
+                "min_getiri": round(min_getiri, 2),
+                "son_getiri": round(getiri, 2),
+                "hit4": bool(max_getiri >= 4.0),
+                "hit7": bool(max_getiri >= 7.0),
+                "once_yesil_sonra_zarar": bool(max_getiri >= 1.0 and getiri < 0),
+                "snapshot": snap,
+                "tamamlanma_ts": time.time(),
+            }
+            ILK_AL_SONUCLAR.append(sonuc)
+            p["aktif"] = False
+
+            print(
+                "[ILK AL SONUC] "
+                + json.dumps(sonuc, ensure_ascii=False)
+            )
 
 
 
@@ -479,6 +522,69 @@ def telegram_gonder(mesaj):
             print(chat_id, r.text)
         except Exception as e:
             print(chat_id, e)
+
+
+def ilk_al_performans_raporu():
+    """Tamamlanmış 3 saatlik ilk AL örneklerinin özetini üretir."""
+    if not ILK_AL_SONUCLAR:
+        return None
+
+    # Son 24 saatte tamamlananları raporla.
+    simdi = time.time()
+    veriler = [
+        x for x in ILK_AL_SONUCLAR
+        if simdi - float(x.get("tamamlanma_ts", simdi)) <= 24 * 60 * 60
+    ]
+    if not veriler:
+        return None
+
+    n = len(veriler)
+    hit4 = sum(1 for x in veriler if x.get("hit4"))
+    hit7 = sum(1 for x in veriler if x.get("hit7"))
+    yesil_sonra_zarar = sum(1 for x in veriler if x.get("once_yesil_sonra_zarar"))
+    son_artida = sum(1 for x in veriler if float(x.get("son_getiri", 0) or 0) > 0)
+
+    ort_max = sum(float(x.get("max_getiri", 0) or 0) for x in veriler) / n
+    ort_min = sum(float(x.get("min_getiri", 0) or 0) for x in veriler) / n
+    ort_son = sum(float(x.get("son_getiri", 0) or 0) for x in veriler) / n
+
+    # En iyi ve en kötü ilk AL örnekleri
+    en_iyi = max(veriler, key=lambda x: float(x.get("max_getiri", 0) or 0))
+    en_kotu = min(veriler, key=lambda x: float(x.get("son_getiri", 0) or 0))
+
+    return (
+        "📊 İLK AL GERÇEK PERFORMANS RAPORU\n\n"
+        f"Tamamlanan ilk AL: {n}\n"
+        f"+%4 gören: {hit4} (%{hit4/n*100:.1f})\n"
+        f"+%7 gören: {hit7} (%{hit7/n*100:.1f})\n"
+        f"3 saat sonunda artıda: {son_artida} (%{son_artida/n*100:.1f})\n"
+        f"Önce +%1 görüp sonra zarara geçen: {yesil_sonra_zarar} (%{yesil_sonra_zarar/n*100:.1f})\n\n"
+        f"Ortalama en iyi hareket: %{ort_max:+.2f}\n"
+        f"Ortalama en kötü hareket: %{ort_min:+.2f}\n"
+        f"3 saat sonu ortalama: %{ort_son:+.2f}\n\n"
+        f"🏆 En iyi: {en_iyi['symbol']} | tepe %{en_iyi['max_getiri']:+.2f} | son %{en_iyi['son_getiri']:+.2f}\n"
+        f"⚠️ En kötü: {en_kotu['symbol']} | tepe %{en_kotu['max_getiri']:+.2f} | son %{en_kotu['son_getiri']:+.2f}\n\n"
+        "Bu rapor ilk AL mesajlarının gerçek performansını ölçer; "
+        "tek bir uçan coin yerine bütün ilk AL'ları birlikte değerlendirir."
+    )
+
+
+def performans_rapor_kontrol():
+    global SON_PERFORMANS_RAPOR_TARIHI
+
+    simdi = datetime.now(LOCAL_TZ)
+    bugun = simdi.strftime("%Y-%m-%d")
+
+    if simdi.hour < RAPOR_SAATI:
+        return
+    if SON_PERFORMANS_RAPOR_TARIHI == bugun:
+        return
+
+    mesaj = ilk_al_performans_raporu()
+    if mesaj:
+        print(mesaj)
+        telegram_gonder(mesaj)
+        SON_PERFORMANS_RAPOR_TARIHI = bugun
 
 
 def veri_getir(symbol, saat=24):
@@ -1738,6 +1844,12 @@ while True:
                     al_takip_guncelle(r.json().get("data", []))
                 except Exception as e:
                     print("Kâr bildirim takip hatası:", e)
+
+            # Günlük tek performans raporu; yeni sinyal üretmez.
+            try:
+                performans_rapor_kontrol()
+            except Exception as e:
+                print("İlk AL performans rapor hatası:", e)
 
     except Exception as e:
                     print("Hızlı AL takip hatası:", e)
