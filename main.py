@@ -1,8 +1,9 @@
 # ==========================================
-# AI COIN ASSISTANT - V9 | ILK AL GERCEK PERFORMANS TAKIBI
+# AI COIN ASSISTANT - V6 | ERKEN PUAN + ASSISTANT ANA AL + %4 KAR
 # Taban: main (21).py
 # 21 sadeligi + 13 AL/SAT/Kar Koru + 1-3-5-10 dk erken yakalama
-# Giris/Devam skorları sadece bilgi, AL için veto DEGIL
+# Giris/Devam/Kalicilik skorları sadece bilgi, AL için veto DEGIL
+# Kalicilik V1: kısa sıçramayla uzun devamı ayırmaya çalışan bilgi katmanı
 # Fast Scan V1: 60 sn hızlı ön tarama + 5 dk tam tarama
 # AL Relax V1: normal AL için ADX 27 / AI 80
 # Final Cleanup / Core Candidate Scanner
@@ -12,12 +13,11 @@
 import os
 import time
 import json
-from datetime import datetime, timezone, timedelta
 import requests
 import feedparser
 
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 
 CHAT_IDS = [1877715122, 2097448038]
 
@@ -30,6 +30,11 @@ tarama_sayaci = 0
 # Early Capture V1: önceki taramadaki hızlanmayı ölçmek için hafıza.
 onceki_tarama = {}
 
+# Kalıcılık V1: aynı hareketin birkaç tarama boyunca gücünü koruyup korumadığını ölçer.
+# AL kararını DEĞİŞTİRMEZ; yalnızca mesajda bilgi üretir.
+kalicilik_gecmisi = {}
+KALICILIK_GECMIS_UZUNLUK = 5
+
 # Çoklu Güç Havuzu:
 # Güçlenme işareti veren coin 5 dakika boyunca, 1 dk fiyat hareketi %0.40 altında kalsa bile izlenir.
 guc_izleme_havuzu = {}
@@ -41,19 +46,11 @@ son_ai_kararlar = {}
 # Sade birleşik: açık AL takibi
 AL_TAKIP = {}
 POZISYON_TAKIP_SURESI = 15
-KAR4_BILDIR_ESIK = 4.0
-KAR7_BILDIR_ESIK = 7.0
+KAR_BILDIR_ESIK = 5.0
 KAR_KORU_ORAN = 40
 ILK_ZARAR_KES = -0.8
 TEPE_GERI_VERME = -1.4
 MIN_KAR_KORUMA = 2.5
-
-# İlk AL performans ölçümü
-ILK_AL_TAKIP_SURESI = 3 * 60 * 60   # 3 saat
-RAPOR_SAATI = 21                    # Türkiye saati
-LOCAL_TZ = timezone(timedelta(hours=3))
-ILK_AL_SONUCLAR = []
-SON_PERFORMANS_RAPOR_TARIHI = None
 
 
 
@@ -187,146 +184,169 @@ def destek_skorlari(aday):
     return round(max(0, min(100, giris)), 1), round(max(0, min(100, devam)), 1)
 
 
-def potansiyel_skoru_hesapla(aday):
+
+def kalicilik_skoru_hesapla(aday):
     """
-    Amaç: 'AL olur mu?'dan ayrı olarak, buradan yaklaşık +%4 devam kapasitesini ölçmek.
-    70+ = güçlü %4 potansiyel
-    85+ = çok güçlü, %6-7 uzama ihtimali daha yüksek
-    Tek başına garanti değildir; yalnız Assistant AL ile birlikte kullanılır.
+    Kalıcılık V1 — bilgi amaçlı hareket-devam tahmini.
+
+    Amaç: İlk AL'dan sonra sadece kısa bir +% hareket yapıp dönebilecek adaylarla,
+    gücünü birkaç tarama boyunca koruma ihtimali daha yüksek adayları ayırmaya
+    yardımcı olmak. Bu skor AL için veto değildir ve olasılık/garanti değildir.
     """
+    symbol = aday.get("symbol", "")
     t = aday.get("teknik") or {}
     m = aday.get("mikro") or {}
 
-    ai = float(aday.get("ai_skoru", 0) or 0)
-    radar = float(aday.get("radar_skoru", 0) or 0)
-    hacim = float(aday.get("hacim", 0) or 0)
-    lider = float(aday.get("lider_skoru", 0) or 0)
-    btc_guc = float(aday.get("btc_guc_skoru", 0) or 0)
-    btc_fark3 = float(aday.get("btc_fark3", 0) or 0)
-
-    d1 = float(m.get("d1", 0) or 0)
-    d3 = float(m.get("d3", 0) or 0)
-    d5 = float(m.get("d5", 0) or 0)
-    d10 = float(m.get("d10", 0) or 0)
-    h1 = float(m.get("hacim1x", 0) or 0)
-    hivme = float(m.get("hacim_ivme", 0) or 0)
-
-    rsi = t.get("rsi")
-    adx = t.get("adx")
-    macd = t.get("macd_hist")
-    ema20 = t.get("ema20")
-    ema50 = t.get("ema50")
     fiyat = float(aday.get("fiyat", 0) or 0)
+    hacim = float(aday.get("hacim", 0) or 0)
+    d1 = float(m.get("d1", 0) or 0)
+    d3m = float(m.get("d3", 0) or 0)
+    d5m = float(m.get("d5", 0) or 0)
+    d10m = float(m.get("d10", 0) or 0)
+    degisim3 = float(aday.get("degisim3", 0) or 0)
+    btc_fark3 = float(aday.get("btc_fark3", 0) or 0)
+    lider = float(aday.get("lider_skoru", 0) or 0)
+    adx = t.get("adx")
+    rsi = t.get("rsi")
+    macd = t.get("macd_hist")
+    ema20, ema50 = t.get("ema20"), t.get("ema50")
 
-    skor = 0.0
+    ema_ok = (
+        ema20 is not None and ema50 is not None and fiyat > 0
+        and ema20 > ema50 and fiyat > ema20
+    )
+    macd_ok = macd is not None and macd > 0
 
-    # 1) Kısa vade ivme: en ağır bölüm (0-28)
-    mikro_skor = float(m.get("skor", 0) or 0)
-    skor += min(18, mikro_skor * 0.18)
-    if d1 > 0 and d3 > 0 and d5 > 0:
-        skor += 4
-    if m.get("fiyat_ivme"):
-        skor += 3
-    if m.get("basamak"):
-        skor += 3
+    skor = 35.0
+    nedenler = []
 
-    # 2) Hacim davranışı (0-18)
-    if hacim >= 3:
-        skor += 8
-    elif hacim >= 1.5:
-        skor += 6
-    elif hacim >= 0.8:
-        skor += 4
-    elif hacim >= 0.5:
-        skor += 2
-
-    if h1 >= 1.8:
-        skor += 5
-    elif h1 >= 1.3:
-        skor += 3
-    if hivme >= 1.5:
-        skor += 5
-    elif hivme >= 1.2:
-        skor += 3
-
-    # 3) Teknik devam gücü (0-22)
-    ema_ok = ema20 is not None and ema50 is not None and ema20 > ema50 and fiyat > ema20
+    # Ana trend gücü
     if ema_ok:
-        skor += 5
-    if macd is not None and macd > 0:
-        skor += 4
-    if adx is not None:
-        if adx >= 35:
-            skor += 7
-        elif adx >= 30:
-            skor += 6
-        elif adx >= 25:
-            skor += 4
-    if rsi is not None:
-        if 52 <= rsi <= 68:
-            skor += 6
-        elif 68 < rsi <= 74:
-            skor += 3
-
-    # 4) Piyasa liderliği / BTC ayrışması (0-17)
-    skor += min(7, lider * 0.7)
-    skor += min(5, btc_guc * 0.5)
-    if btc_fark3 >= 2:
-        skor += 5
-    elif btc_fark3 >= 1:
-        skor += 3
-    elif btc_fark3 >= 0:
-        skor += 1
-
-    # 5) Ana motor kalitesi (0-15)
-    if ai >= 92:
-        skor += 7
-    elif ai >= 85:
-        skor += 5
-    elif ai >= 80:
-        skor += 3
-
-    if radar >= 85:
         skor += 8
-    elif radar >= 75:
-        skor += 6
-    elif radar >= 65:
-        skor += 4
+        nedenler.append("EMA trendi korunuyor")
+    if macd_ok:
+        skor += 7
+        nedenler.append("MACD pozitif")
+    if adx is not None:
+        if adx >= 40:
+            skor += 14
+            nedenler.append("ADX çok güçlü")
+        elif adx >= 30:
+            skor += 10
+            nedenler.append("ADX güçlü")
+        elif adx >= 25:
+            skor += 5
+        elif adx < 20:
+            skor -= 8
 
-    # Şişmiş / geç kalmış hareket cezaları.
-    if m.get("sisti"):
-        skor -= 22
-    if d10 >= 5.5:
-        skor -= 8
-    if d5 >= 4.0:
+    # Hacmin seviyesi ve hızlanması
+    if hacim >= 8:
+        skor += 10
+        nedenler.append("hacim çok güçlü")
+    elif hacim >= 5:
+        skor += 8
+        nedenler.append("hacim güçlü")
+    elif hacim >= 2:
+        skor += 4
+    elif hacim < 0.8:
         skor -= 6
-    if rsi is not None and rsi > 78:
+
+    if aday.get("hacim_hizlaniyor"):
+        skor += 5
+        nedenler.append("hacim hızlanıyor")
+    if aday.get("momentum_hizlaniyor"):
+        skor += 4
+        nedenler.append("momentum hızlanıyor")
+    if aday.get("btc_farki_aciliyor"):
+        skor += 4
+        nedenler.append("BTC farkı açılıyor")
+    if aday.get("lider_gucleniyor"):
+        skor += 4
+        nedenler.append("liderlik güçleniyor")
+    if aday.get("basamakli_trend"):
+        skor += 6
+        nedenler.append("basamaklı yapı")
+
+    # BTC'ye göre bağıl güç
+    if btc_fark3 >= 2:
+        skor += 7
+        nedenler.append("BTC'den belirgin güçlü")
+    elif btc_fark3 >= 0.5:
+        skor += 4
+    elif btc_fark3 < -1:
+        skor -= 7
+
+    # Mikro yapı: pozitif ama aşırı şişmemiş hareket daha kalıcı kabul edilir.
+    if d3m > 0 and d5m > 0 and d10m > 0:
+        skor += 5
+    if 0.5 <= d10m <= 5.5:
+        skor += 4
+    if m.get("basamak"):
+        skor += 4
+    if m.get("sisti") or d10m >= 7 or d5m >= 5:
         skor -= 12
-    elif rsi is not None and rsi > 75:
+        nedenler.append("kısa vadede şişme riski")
+    if d1 < -0.8 and d3m < 0:
         skor -= 5
 
-    # Hacim çok zayıfsa +%4 devam kapasitesine ciddi ceza.
-    if hacim < 0.35 and h1 < 1.0 and hivme < 1.1:
-        skor -= 15
+    # RSI aşırı sıcaksa uzun devam puanını düşür; 70'leri otomatik veto etmez.
+    if rsi is not None:
+        if 52 <= rsi <= 70:
+            skor += 5
+        elif 70 < rsi <= 77:
+            skor += 1
+        elif rsi > 82:
+            skor -= 10
+            nedenler.append("RSI aşırı sıcak")
+        elif rsi < 45:
+            skor -= 6
+
+    # Birkaç tarama boyunca aynı hareketin korunması en önemli ek bilgi.
+    hist = kalicilik_gecmisi.setdefault(symbol, [])
+    if hist:
+        sonlar = hist[-3:]
+        hacim_koruma = sum(1 for x in sonlar if hacim >= x.get("hacim", hacim) * 0.80)
+        trend_koruma = sum(1 for x in sonlar if degisim3 >= x.get("degisim3", degisim3) - 0.50)
+        btc_koruma = sum(1 for x in sonlar if btc_fark3 >= x.get("btc_fark3", btc_fark3) - 0.40)
+        n = len(sonlar)
+
+        if n >= 2 and hacim_koruma >= n - 1:
+            skor += 6
+            nedenler.append("hacim birkaç taramadır korunuyor")
+        if n >= 2 and trend_koruma >= n - 1:
+            skor += 7
+            nedenler.append("3s güç birkaç taramadır korunuyor")
+        if n >= 2 and btc_koruma >= n - 1:
+            skor += 4
+        if n >= 2 and hacim_koruma == 0 and trend_koruma == 0:
+            skor -= 8
+            nedenler.append("güç hızlı sönüyor")
+
+    hist.append({
+        "zaman": time.time(),
+        "hacim": hacim,
+        "degisim3": degisim3,
+        "btc_fark3": btc_fark3,
+        "d1": d1,
+        "d3m": d3m,
+    })
+    if len(hist) > KALICILIK_GECMIS_UZUNLUK:
+        del hist[:-KALICILIK_GECMIS_UZUNLUK]
 
     skor = round(max(0, min(100, skor)), 1)
-
-    if skor >= 85:
-        etiket = "🚀 Çok Güçlü (%6-7 uzama adayı)"
-    elif skor >= 70:
-        etiket = "🎯 Güçlü (%4+ hedef adayı)"
-    elif skor >= 65:
-        etiket = "🟡 Orta-Güçlü (%4 adayı)"
-    elif skor >= 58:
-        etiket = "🟡 Orta"
+    if skor >= 80:
+        etiket = "Uzun devam adayı"
+    elif skor >= 68:
+        etiket = "Devam güçlü"
+    elif skor >= 55:
+        etiket = "Orta / izle"
     else:
-        etiket = "⚪ Zayıf"
+        etiket = "Hızlı hareket / dönüş riski"
 
-    return skor, etiket
-
+    return skor, etiket, nedenler[:4]
 
 def al_takip_baslat(aday):
-    """Gerçek AL mesajı gönderilen coini +%4 ve +%7 başarı analizi için takip eder."""
+    """Gerçek AL mesajı gönderilen coini yalnızca +%5 kâr bildirimi için takip eder."""
     symbol = aday.get("symbol")
     fiyat = float(aday.get("fiyat", 0) or 0)
     if not symbol or fiyat <= 0:
@@ -336,48 +356,17 @@ def al_takip_baslat(aday):
     if mevcut and mevcut.get("aktif"):
         return
 
-    m = aday.get("mikro") or {}
-    t = aday.get("teknik") or {}
-
     AL_TAKIP[symbol] = {
         "aktif": True,
         "giris": fiyat,
-        "baslangic_ts": time.time(),
-        "tepe_fiyat": fiyat,
-        "dip_fiyat": fiyat,
-        "son_fiyat": fiyat,
-        "kar4_bildirildi": False,
-        "kar7_bildirildi": False,
-
-        # Sonradan +%4 / +%7 yapanların ortak özelliklerini karşılaştırmak için AL anı snapshot'ı.
-        "snapshot": {
-            "ai": float(aday.get("ai_skoru", 0) or 0),
-            "radar": float(aday.get("radar_skoru", 0) or 0),
-            "erken": float(aday.get("erken_puan", 0) or 0),
-            "giris_kalitesi": float(aday.get("giris_kalitesi", 0) or 0),
-            "devam_gucu": float(aday.get("devam_gucu", 0) or 0),
-            "potansiyel": float(aday.get("potansiyel_skoru", 0) or 0),
-            "hacim": float(aday.get("hacim", 0) or 0),
-            "d1": float(m.get("d1", 0) or 0),
-            "d3": float(m.get("d3", 0) or 0),
-            "d5": float(m.get("d5", 0) or 0),
-            "d10": float(m.get("d10", 0) or 0),
-            "hacim1x": float(m.get("hacim1x", 0) or 0),
-            "hacim_ivme": float(m.get("hacim_ivme", 0) or 0),
-            "rsi": t.get("rsi"),
-            "adx": t.get("adx"),
-            "macd_hist": t.get("macd_hist"),
-            "btc_fark3": float(aday.get("btc_fark3", 0) or 0),
-            "lider_skoru": float(aday.get("lider_skoru", 0) or 0),
-        },
+        "kar_bildirildi": False,
     }
 
 
 def al_takip_guncelle(ticker):
     """
     Otomatik SAT/ÇIK yok.
-    İlk AL fiyatına göre +%4 ve +%7 görülünce ayrı, tek seferlik kâr mesajları yollar.
-    Ayrıca AL anındaki özellikleri Railway loguna snapshot olarak basar.
+    Sadece ilk AL fiyatına göre +%5 görülünce tek seferlik ara kâr mesajı yollar.
     """
     if not AL_TAKIP:
         return
@@ -393,7 +382,7 @@ def al_takip_guncelle(ticker):
             pass
 
     for symbol, p in AL_TAKIP.items():
-        if not p.get("aktif"):
+        if not p.get("aktif") or p.get("kar_bildirildi"):
             continue
 
         fiyat = fiyatlar.get(symbol)
@@ -402,79 +391,17 @@ def al_takip_guncelle(ticker):
 
         giris = float(p.get("giris", fiyat))
         getiri = _pct(fiyat, giris)
-        snap = p.get("snapshot") or {}
 
-        # İlk AL'dan sonraki gerçek performansı sürekli ölç.
-        p["son_fiyat"] = fiyat
-        p["tepe_fiyat"] = max(float(p.get("tepe_fiyat", giris)), fiyat)
-        p["dip_fiyat"] = min(float(p.get("dip_fiyat", giris)), fiyat)
-
-        max_getiri = _pct(p["tepe_fiyat"], giris)
-        min_getiri = _pct(p["dip_fiyat"], giris)
-
-        if (not p.get("kar4_bildirildi")) and getiri >= KAR4_BILDIR_ESIK:
-            p["kar4_bildirildi"] = True
-
-            print(
-                "[KAR SNAPSHOT +4] "
-                + json.dumps({"symbol": symbol, "getiri": round(getiri, 2), **snap}, ensure_ascii=False)
-            )
-
+        if getiri >= KAR_BILDIR_ESIK:
+            p["kar_bildirildi"] = True
             mesaj = (
-                f"💰 +%4 KÂR BÖLGESİ - {symbol}\n"
+                f"💰 +%5 KÂR BÖLGESİ - {symbol}\n"
                 f"İlk AL: {giris:.4f} | Güncel: {fiyat:.4f}\n"
                 f"Getiri: %{getiri:+.2f}\n"
-                f"İlk Potansiyel: {snap.get('potansiyel', 0)}/100 | "
-                f"Devam: {snap.get('devam_gucu', 0)}/100\n"
-                f"Not: Çık emri değil; kârı değerlendirmek için ara uyarı."
+                f"Not: Çık emri değil; kârı değerlendirmek / çıkışa hazırlanmak için ara uyarı."
             )
             print(mesaj)
             telegram_gonder(mesaj)
-
-        if (not p.get("kar7_bildirildi")) and getiri >= KAR7_BILDIR_ESIK:
-            # +7 görülmüşse +4 de doğal olarak başarılmış sayılır.
-            p["kar4_bildirildi"] = True
-            p["kar7_bildirildi"] = True
-
-            print(
-                "[KAR SNAPSHOT +7] "
-                + json.dumps({"symbol": symbol, "getiri": round(getiri, 2), **snap}, ensure_ascii=False)
-            )
-
-            mesaj = (
-                f"🚀 +%7 KÂR BÖLGESİ - {symbol}\n"
-                f"İlk AL: {giris:.4f} | Güncel: {fiyat:.4f}\n"
-                f"Getiri: %{getiri:+.2f}\n"
-                f"İlk Potansiyel: {snap.get('potansiyel', 0)}/100 | "
-                f"Devam: {snap.get('devam_gucu', 0)}/100\n"
-                f"Not: Güçlü hedef bölgesi; kârı değerlendirmek için önemli ara uyarı."
-            )
-            print(mesaj)
-            telegram_gonder(mesaj)
-
-        # 3 saat dolunca ilk AL performansını tamamla.
-        if time.time() - float(p.get("baslangic_ts", time.time())) >= ILK_AL_TAKIP_SURESI:
-            sonuc = {
-                "symbol": symbol,
-                "giris": round(giris, 8),
-                "son_fiyat": round(fiyat, 8),
-                "max_getiri": round(max_getiri, 2),
-                "min_getiri": round(min_getiri, 2),
-                "son_getiri": round(getiri, 2),
-                "hit4": bool(max_getiri >= 4.0),
-                "hit7": bool(max_getiri >= 7.0),
-                "once_yesil_sonra_zarar": bool(max_getiri >= 1.0 and getiri < 0),
-                "snapshot": snap,
-                "tamamlanma_ts": time.time(),
-            }
-            ILK_AL_SONUCLAR.append(sonuc)
-            p["aktif"] = False
-
-            print(
-                "[ILK AL SONUC] "
-                + json.dumps(sonuc, ensure_ascii=False)
-            )
-
 
 
 
@@ -522,69 +449,6 @@ def telegram_gonder(mesaj):
             print(chat_id, r.text)
         except Exception as e:
             print(chat_id, e)
-
-
-def ilk_al_performans_raporu():
-    """Tamamlanmış 3 saatlik ilk AL örneklerinin özetini üretir."""
-    if not ILK_AL_SONUCLAR:
-        return None
-
-    # Son 24 saatte tamamlananları raporla.
-    simdi = time.time()
-    veriler = [
-        x for x in ILK_AL_SONUCLAR
-        if simdi - float(x.get("tamamlanma_ts", simdi)) <= 24 * 60 * 60
-    ]
-    if not veriler:
-        return None
-
-    n = len(veriler)
-    hit4 = sum(1 for x in veriler if x.get("hit4"))
-    hit7 = sum(1 for x in veriler if x.get("hit7"))
-    yesil_sonra_zarar = sum(1 for x in veriler if x.get("once_yesil_sonra_zarar"))
-    son_artida = sum(1 for x in veriler if float(x.get("son_getiri", 0) or 0) > 0)
-
-    ort_max = sum(float(x.get("max_getiri", 0) or 0) for x in veriler) / n
-    ort_min = sum(float(x.get("min_getiri", 0) or 0) for x in veriler) / n
-    ort_son = sum(float(x.get("son_getiri", 0) or 0) for x in veriler) / n
-
-    # En iyi ve en kötü ilk AL örnekleri
-    en_iyi = max(veriler, key=lambda x: float(x.get("max_getiri", 0) or 0))
-    en_kotu = min(veriler, key=lambda x: float(x.get("son_getiri", 0) or 0))
-
-    return (
-        "📊 İLK AL GERÇEK PERFORMANS RAPORU\n\n"
-        f"Tamamlanan ilk AL: {n}\n"
-        f"+%4 gören: {hit4} (%{hit4/n*100:.1f})\n"
-        f"+%7 gören: {hit7} (%{hit7/n*100:.1f})\n"
-        f"3 saat sonunda artıda: {son_artida} (%{son_artida/n*100:.1f})\n"
-        f"Önce +%1 görüp sonra zarara geçen: {yesil_sonra_zarar} (%{yesil_sonra_zarar/n*100:.1f})\n\n"
-        f"Ortalama en iyi hareket: %{ort_max:+.2f}\n"
-        f"Ortalama en kötü hareket: %{ort_min:+.2f}\n"
-        f"3 saat sonu ortalama: %{ort_son:+.2f}\n\n"
-        f"🏆 En iyi: {en_iyi['symbol']} | tepe %{en_iyi['max_getiri']:+.2f} | son %{en_iyi['son_getiri']:+.2f}\n"
-        f"⚠️ En kötü: {en_kotu['symbol']} | tepe %{en_kotu['max_getiri']:+.2f} | son %{en_kotu['son_getiri']:+.2f}\n\n"
-        "Bu rapor ilk AL mesajlarının gerçek performansını ölçer; "
-        "tek bir uçan coin yerine bütün ilk AL'ları birlikte değerlendirir."
-    )
-
-
-def performans_rapor_kontrol():
-    global SON_PERFORMANS_RAPOR_TARIHI
-
-    simdi = datetime.now(LOCAL_TZ)
-    bugun = simdi.strftime("%Y-%m-%d")
-
-    if simdi.hour < RAPOR_SAATI:
-        return
-    if SON_PERFORMANS_RAPOR_TARIHI == bugun:
-        return
-
-    mesaj = ilk_al_performans_raporu()
-    if mesaj:
-        print(mesaj)
-        telegram_gonder(mesaj)
-        SON_PERFORMANS_RAPOR_TARIHI = bugun
 
 
 def veri_getir(symbol, saat=24):
@@ -1105,24 +969,12 @@ def h_karar_hesapla(aday):
     rsi_temiz = rsi is not None and 48 <= rsi <= 75
     rsi_kabul = rsi is not None and 45 <= rsi <= 75
 
-    # ERA düzeltmesi: RSI 75-80 güçlü trendde otomatik BEKLE değildir.
-    # Yalnız AI, EMA, MACD ve ADX birlikte çok güçlüyse istisna açılır.
-    yuksek_rsi_trend = (
-        rsi is not None
-        and 75 < rsi <= 80
-        and ema_yukari
-        and macd_pozitif
-        and adx is not None
-        and adx >= 30
-        and skor >= 90
-    )
-
     # Normal Radar adayında artık daha sıkı teknik teyit:
     # EMA yukarı + sağlıklı RSI + güçlü ADX + pozitif MACD + yüksek AI skoru.
     normal_al = (
         not aday.get("erken_aday", False)
         and ema_yukari
-        and (rsi_temiz or yuksek_rsi_trend)
+        and rsi_temiz
         and macd_pozitif
         and adx is not None
         and adx >= 27
@@ -1135,7 +987,7 @@ def h_karar_hesapla(aday):
         "Elit" in kategori
         and radar >= 82
         and ema_yukari
-        and (rsi_kabul or yuksek_rsi_trend)
+        and rsi_kabul
         and macd_pozitif
         and adx is not None
         and adx >= 28
@@ -1646,9 +1498,14 @@ while True:
             a["giris_kalitesi"] = giris_k
             a["devam_gucu"] = devam_g
             a["erken_puan"] = round(float((a.get("mikro") or {}).get("skor", 0) or 0), 1)
-            pot_skor, pot_etiket = potansiyel_skoru_hesapla(a)
-            a["potansiyel_skoru"] = pot_skor
-            a["potansiyel_etiket"] = pot_etiket
+            kal_skor, kal_etiket, kal_nedenler = kalicilik_skoru_hesapla(a)
+            a["kalicilik_skoru"] = kal_skor
+            a["kalicilik_etiket"] = kal_etiket
+            a["kalicilik_nedenler"] = kal_nedenler
+            print(
+                f"[KALICILIK] {a.get('symbol')} | {kal_skor}/100 | {kal_etiket} | "
+                f"{' • '.join(kal_nedenler) if kal_nedenler else 'ek teyit yok'}"
+            )
 
 
             # --------------------------------------------------
@@ -1680,17 +1537,7 @@ while True:
                     adx_ok = adx is not None and adx >= 30
                     skor_ok = ai_skor >= 80
                 elif "Elit" in kategori:
-                    rsi_ok = rsi is not None and (
-                        45 <= rsi <= 75
-                        or (
-                            75 < rsi <= 80
-                            and ema_ok
-                            and macd_ok
-                            and adx is not None
-                            and adx >= 30
-                            and ai_skor >= 90
-                        )
-                    )
+                    rsi_ok = rsi is not None and 45 <= rsi <= 75
                     adx_ok = adx is not None and adx >= 28
                     skor_ok = ai_skor >= 85
                 elif "Yıldız" in kategori:
@@ -1700,17 +1547,7 @@ while True:
                     adx_ok = adx is not None and adx >= 30
                     skor_ok = ai_skor >= 85
                 else:
-                    rsi_ok = rsi is not None and (
-                        48 <= rsi <= 75
-                        or (
-                            75 < rsi <= 80
-                            and ema_ok
-                            and macd_ok
-                            and adx is not None
-                            and adx >= 30
-                            and ai_skor >= 90
-                        )
-                    )
+                    rsi_ok = rsi is not None and 48 <= rsi <= 75
                     adx_ok = adx is not None and adx >= 27
                     skor_ok = ai_skor >= 80
 
@@ -1782,14 +1619,6 @@ while True:
                 if "🟢 AL" not in karar:
                     continue
 
-                # V7: AL tek başına yetmez; buradan +%4 devam potansiyeli güçlü olmalı.
-                if float(a.get("potansiyel_skoru", 0) or 0) < 65:
-                    print(
-                        f"[POTANSIYEL VETO] {symbol} | Assistant=AL ama "
-                        f"Potansiyel={a.get('potansiyel_skoru', 0)}/100 < 65"
-                    )
-                    continue
-
                 # Aynı AL kararını tekrar gönderme.
                 if onceki_karar == karar:
                     continue
@@ -1847,22 +1676,22 @@ while True:
                         f"{a['symbol']} | {a.get('radar_kategori', '')}\n"
                         f"{a.get('karar')} | AI {a.get('ai_skoru', 0)}/100 | Risk: {a.get('risk', 'Bilinmiyor')}\n"
                         f"🌱 Erken {a.get('erken_puan', 0)}/100 | 🎯 Giriş {a.get('giris_kalitesi', 0)}/100 | 🚀 Devam {a.get('devam_gucu', 0)}/100\n"
-                        f"💎 Potansiyel {a.get('potansiyel_skoru', 0)}/100 | {a.get('potansiyel_etiket', '')}\n"
+                        f"🧭 Kalıcılık {a.get('kalicilik_skoru', 0)}/100 — {a.get('kalicilik_etiket', 'İzle')}\n"
                         f"Radar {a['radar_skoru']}/100 | Fiyat {round(a['fiyat'], 4)} | Hacim {a['hacim']}x\n"
                         f"{mikro_satir}"
                         f"EMA {ema_yon} | RSI {teknik['rsi']} | ADX {teknik['adx']} | MACD {macd_yon}\n"
-                        f"📌 Takip: AL anlık | +%4 ve +%7 kâr ara uyarısı\n"
+                        f"📌 Takip: AL anlık | +%5'te sadece kâr ara uyarısı\n"
                         f"{neden_alarm}Neden: {neden}\n\n"
                     )
 
                 print(mesaj)
                 telegram_gonder(mesaj)
 
-                # Yalnızca gerçekten gönderilen AL'ları +%4/+%7 kâr analizi için takip et.
+                # Yalnızca gerçekten gönderilen AL'ları +%5 kâr bildirimi için takip et.
                 for _a in gonderilecekler:
                     al_takip_baslat(_a)
 
-        # Ana tarama 60 sn; +%4/+%7 takibi için açık AL'lar 15 sn'de bir kontrol edilir.
+        # Ana tarama 60 sn; kâr bildirimi için açık AL'lar 15 sn'de bir kontrol edilir.
         beklenen = 0
         while beklenen < TARAMA_SURESI:
             sure = min(POZISYON_TAKIP_SURESI, TARAMA_SURESI - beklenen)
@@ -1876,12 +1705,6 @@ while True:
                     al_takip_guncelle(r.json().get("data", []))
                 except Exception as e:
                     print("Kâr bildirim takip hatası:", e)
-
-            # Günlük tek performans raporu; yeni sinyal üretmez.
-            try:
-                performans_rapor_kontrol()
-            except Exception as e:
-                print("İlk AL performans rapor hatası:", e)
 
     except Exception as e:
                     print("Hızlı AL takip hatası:", e)
