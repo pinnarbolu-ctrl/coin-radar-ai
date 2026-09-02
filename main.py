@@ -17,7 +17,7 @@ import requests
 import feedparser
 
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 CHAT_IDS = [1877715122, 2097448038]
 
@@ -35,21 +35,13 @@ onceki_tarama = {}
 kalicilik_gecmisi = {}
 KALICILIK_GECMIS_UZUNLUK = 5
 
-# Teknik veri kısa süreli alınamazsa iyi adayı sırf API/veri kesintisi yüzünden kaçırmamak için
-# son başarılı teknik analiz en fazla 3 dakika yedek olarak kullanılabilir.
-# Bu sadece veri kesintisi yedeğidir; yeni bir AL filtresi/veto değildir.
-teknik_veri_cache = {}
-TEKNIK_CACHE_SURESI = 3 * 60
-
 # Çoklu Güç Havuzu:
 # Güçlenme işareti veren coin 5 dakika boyunca, 1 dk fiyat hareketi %0.40 altında kalsa bile izlenir.
 guc_izleme_havuzu = {}
 GUC_IZLEME_SURESI = 5 * 60
 
-# Son görülen karar ve gerçekten Telegram'a ulaşmış AL durumu ayrı tutulur.
-# Böylece AL hesaplanıp gönderim oluşmazsa sonraki taramada tekrar denenir.
+# Aynı kararın tekrar Telegram gönderimini engeller.
 son_ai_kararlar = {}
-son_al_gonderildi = {}
 
 # Sade birleşik: açık AL takibi
 AL_TAKIP = {}
@@ -443,10 +435,9 @@ NEGATIF = [
 def telegram_gonder(mesaj):
     if not BOT_TOKEN:
         print("BOT_TOKEN bulunamadı. Railway Variables kontrol et.")
-        return False
+        return
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    basarili = 0
 
     for chat_id in CHAT_IDS:
         try:
@@ -456,19 +447,8 @@ def telegram_gonder(mesaj):
                 timeout=10
             )
             print(chat_id, r.text)
-            if r.ok:
-                try:
-                    cevap = r.json()
-                    if cevap.get("ok") is True:
-                        basarili += 1
-                except Exception:
-                    pass
         except Exception as e:
             print(chat_id, e)
-
-    # En az bir hedefe gerçekten ulaştıysa gönderilmiş sayılır.
-    # Hiçbir hedefe ulaşmadıysa AL sonraki taramada yeniden denenir.
-    return basarili > 0
 
 
 def veri_getir(symbol, saat=24):
@@ -773,34 +753,13 @@ def atr_adx_hesapla(yuksekler, dusukler, kapanislar, periyot=14):
 
 
 def teknik_analiz_hesapla(symbol):
-    simdi = time.time()
-
-    def cache_getir(neden="veri alınamadı"):
-        kayit = teknik_veri_cache.get(symbol)
-        if not kayit:
-            return None
-        yas = simdi - float(kayit.get("zaman", 0) or 0)
-        if yas > TEKNIK_CACHE_SURESI:
-            teknik_veri_cache.pop(symbol, None)
-            return None
-        teknik = dict(kayit.get("teknik") or {})
-        if not teknik:
-            return None
-        teknik["_cache"] = True
-        teknik["_cache_yas_sn"] = int(max(0, yas))
-        print(
-            f"[TEKNIK CACHE] {symbol} | son başarılı veri kullanıldı | "
-            f"yaş={int(max(0, yas))} sn | neden={neden}"
-        )
-        return teknik
-
     try:
         d = veri_getir(symbol, 120)
         c = d.get("c", [])
         h = d.get("h", [])
         l = d.get("l", [])
         if len(c) < 55 or len(h) != len(c) or len(l) != len(c):
-            return cache_getir("eksik teknik veri")
+            return None
 
         ema20 = ema_hesapla(c, 20)
         ema50 = ema_hesapla(c, 50)
@@ -810,7 +769,7 @@ def teknik_analiz_hesapla(symbol):
         fiyat = c[-1]
         atr_yuzde = (atr / fiyat) * 100 if atr is not None and fiyat else None
 
-        teknik = {
+        return {
             "ema20": round(ema20, 6) if ema20 is not None else None,
             "ema50": round(ema50, 6) if ema50 is not None else None,
             "rsi": round(rsi, 2) if rsi is not None else None,
@@ -819,15 +778,11 @@ def teknik_analiz_hesapla(symbol):
             "macd_hist": round(macd_hist, 6) if macd_hist is not None else None,
             "adx": round(adx, 2) if adx is not None else None,
             "atr": round(atr, 6) if atr is not None else None,
-            "atr_yuzde": round(atr_yuzde, 2) if atr_yuzde is not None else None,
-            "_cache": False,
-            "_cache_yas_sn": 0,
+            "atr_yuzde": round(atr_yuzde, 2) if atr_yuzde is not None else None
         }
-        teknik_veri_cache[symbol] = {"zaman": simdi, "teknik": dict(teknik)}
-        return teknik
     except Exception as e:
         print(f"Teknik analiz hata ({symbol}):", e)
-        return cache_getir(type(e).__name__)
+        return None
 
 
 # ==========================================
@@ -1603,13 +1558,9 @@ while True:
                 adx_txt = "NA" if adx is None else f"{adx:.1f}"
                 macd_txt = "NA" if macd_hist is None else f"{macd_hist:.5f}"
 
-                cache_notu = " | CACHE" if teknik.get("_cache") else ""
-                if teknik.get("_cache"):
-                    cache_notu += f" {teknik.get('_cache_yas_sn', 0)}sn"
-
                 print(
                     f"[AL DEBUG] {a['symbol']} | {a.get('karar', '🟡 BEKLE')} | "
-                    f"{kategori}{cache_notu} | "
+                    f"{kategori} | "
                     f"EMA {durum(ema_ok)} | "
                     f"RSI {rsi_txt} {durum(rsi_ok)} | "
                     f"MACD {macd_txt} {durum(macd_ok)} | "
@@ -1660,17 +1611,16 @@ while True:
             for a in top10:
                 symbol = a["symbol"]
                 karar = a.get("karar", "🟡 BEKLE")
+                onceki_karar = son_ai_kararlar.get(symbol)
                 son_ai_kararlar[symbol] = karar
 
                 # Telegram yalnızca gerçek AL kararlarında konuşur.
-                # Coin AL dışına çıkarsa bir sonraki yeni AL tekrar mesaj hakkı kazanır.
+                # BEKLE ve SAT/PAS arka planda/loglarda izlenmeye devam eder.
                 if "🟢 AL" not in karar:
-                    son_al_gonderildi[symbol] = False
                     continue
 
-                # Sadece GERÇEKTEN Telegram'a ulaşmış aynı AL tekrar edilmez.
-                # AL hesaplandı ama mesaj gönderilemediyse sonraki taramada yeniden dene.
-                if son_al_gonderildi.get(symbol, False):
+                # Aynı AL kararını tekrar gönderme.
+                if onceki_karar == karar:
                     continue
 
                 gonderilecekler.append(a)
@@ -1735,15 +1685,11 @@ while True:
                     )
 
                 print(mesaj)
-                telegram_basarili = telegram_gonder(mesaj)
+                telegram_gonder(mesaj)
 
-                if telegram_basarili:
-                    # Yalnızca Telegram'a gerçekten ulaşan AL'ı gönderildi say.
-                    for _a in gonderilecekler:
-                        son_al_gonderildi[_a["symbol"]] = True
-                        al_takip_baslat(_a)
-                else:
-                    print("[TELEGRAM RETRY] AL mesajı ulaşmadı; sonraki taramada yeniden denenecek.")
+                # Yalnızca gerçekten gönderilen AL'ları +%5 kâr bildirimi için takip et.
+                for _a in gonderilecekler:
+                    al_takip_baslat(_a)
 
         # Ana tarama 60 sn; kâr bildirimi için açık AL'lar 15 sn'de bir kontrol edilir.
         beklenen = 0
