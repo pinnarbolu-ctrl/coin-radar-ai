@@ -1507,6 +1507,57 @@ while True:
                 f"{' • '.join(kal_nedenler) if kal_nedenler else 'ek teyit yok'}"
             )
 
+            # --------------------------------------------------
+            # ERKEN KALICILIK GECISI V2
+            #
+            # Sorun: Kalicilik cok yuksek olsa bile klasik AL kapisi ozellikle
+            # ADX >= 30 teyidini beklerken giris gecikebiliyordu. ADX gecikmeli
+            # bir gostergedir. Bu ek yol, SADECE zaten Erken/Guc havuzuna girmis,
+            # Kalicilik >= 80 olan ve temel teknik yapisi temiz adaylarda ADX'in
+            # 23-29 araliginda olmasina izin verir. Kalicilik dusuk/orta adaylari
+            # gevsetmez ve ana AL mantigina dokunmaz.
+            # --------------------------------------------------
+            if a.get("karar") != "🟢 AL" and kal_skor >= 80:
+                _t = a.get("teknik") or {}
+                _m = a.get("mikro") or {}
+                _fiyat = float(a.get("fiyat", 0) or 0)
+                _ema20 = _t.get("ema20")
+                _ema50 = _t.get("ema50")
+                _rsi = _t.get("rsi")
+                _adx = _t.get("adx")
+                _macd = _t.get("macd_hist")
+                _deg3 = float(a.get("degisim3", 0) or 0)
+                _hacim = float(a.get("hacim", 0) or 0)
+
+                _erken_havuz = bool(a.get("orijinal_erken_aday") or a.get("guc_havuzu_adayi"))
+                _ema_temiz = (
+                    _ema20 is not None and _ema50 is not None and _fiyat > 0
+                    and _ema20 > _ema50 and _fiyat > _ema20
+                )
+                _macd_temiz = _macd is not None and _macd > 0
+                _rsi_temiz = _rsi is not None and 48 <= _rsi <= 72
+                _adx_erken = _adx is not None and _adx >= 23
+                _sismemis = not _m.get("sisti", False) and _deg3 < 5.0
+                _hacim_yeterli = _hacim >= 2.0
+
+                if (
+                    _erken_havuz
+                    and _ema_temiz
+                    and _macd_temiz
+                    and _rsi_temiz
+                    and _adx_erken
+                    and _sismemis
+                    and _hacim_yeterli
+                ):
+                    a["karar"] = "🟢 AL"
+                    a["erken_kalicilik_gecisi"] = True
+                    a.setdefault("nedenler", []).append("Yüksek kalıcılık ile erken teknik teyit")
+                    print(
+                        f"[ERKEN KALICILIK AL] {a.get('symbol')} | "
+                        f"Kalıcılık={kal_skor}/100 | ADX={_adx} | RSI={_rsi} | "
+                        f"3s={_deg3:+.2f}% | Hacim={_hacim:.2f}x"
+                    )
+
 
             # --------------------------------------------------
             # AL DEBUG LOG
@@ -1672,9 +1723,12 @@ while True:
                             f"5dk %{mikro.get('d5', 0)} | 10dk %{mikro.get('d10', 0)}\n"
                         )
 
+                    erken_gecis_satir = "⚡ Erken Kalıcılık Teyidi\n" if a.get("erken_kalicilik_gecisi") else ""
+
                     mesaj += (
                         f"{a['symbol']} | {a.get('radar_kategori', '')}\n"
                         f"{a.get('karar')} | AI {a.get('ai_skoru', 0)}/100 | Risk: {a.get('risk', 'Bilinmiyor')}\n"
+                        f"{erken_gecis_satir}"
                         f"🌱 Erken {a.get('erken_puan', 0)}/100 | 🎯 Giriş {a.get('giris_kalitesi', 0)}/100 | 🚀 Devam {a.get('devam_gucu', 0)}/100\n"
                         f"🧭 Kalıcılık {a.get('kalicilik_skoru', 0)}/100 — {a.get('kalicilik_etiket', 'İzle')}\n"
                         f"Radar {a['radar_skoru']}/100 | Fiyat {round(a['fiyat'], 4)} | Hacim {a['hacim']}x\n"
