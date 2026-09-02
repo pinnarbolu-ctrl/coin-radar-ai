@@ -46,8 +46,10 @@ TEKNIK_CACHE_SURESI = 3 * 60
 guc_izleme_havuzu = {}
 GUC_IZLEME_SURESI = 5 * 60
 
-# Aynı kararın tekrar Telegram gönderimini engeller.
+# Son görülen karar ve gerçekten Telegram'a ulaşmış AL durumu ayrı tutulur.
+# Böylece AL hesaplanıp gönderim oluşmazsa sonraki taramada tekrar denenir.
 son_ai_kararlar = {}
+son_al_gonderildi = {}
 
 # Sade birleşik: açık AL takibi
 AL_TAKIP = {}
@@ -441,9 +443,10 @@ NEGATIF = [
 def telegram_gonder(mesaj):
     if not BOT_TOKEN:
         print("BOT_TOKEN bulunamadı. Railway Variables kontrol et.")
-        return
+        return False
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    basarili = 0
 
     for chat_id in CHAT_IDS:
         try:
@@ -453,8 +456,19 @@ def telegram_gonder(mesaj):
                 timeout=10
             )
             print(chat_id, r.text)
+            if r.ok:
+                try:
+                    cevap = r.json()
+                    if cevap.get("ok") is True:
+                        basarili += 1
+                except Exception:
+                    pass
         except Exception as e:
             print(chat_id, e)
+
+    # En az bir hedefe gerçekten ulaştıysa gönderilmiş sayılır.
+    # Hiçbir hedefe ulaşmadıysa AL sonraki taramada yeniden denenir.
+    return basarili > 0
 
 
 def veri_getir(symbol, saat=24):
@@ -1646,16 +1660,17 @@ while True:
             for a in top10:
                 symbol = a["symbol"]
                 karar = a.get("karar", "🟡 BEKLE")
-                onceki_karar = son_ai_kararlar.get(symbol)
                 son_ai_kararlar[symbol] = karar
 
                 # Telegram yalnızca gerçek AL kararlarında konuşur.
-                # BEKLE ve SAT/PAS arka planda/loglarda izlenmeye devam eder.
+                # Coin AL dışına çıkarsa bir sonraki yeni AL tekrar mesaj hakkı kazanır.
                 if "🟢 AL" not in karar:
+                    son_al_gonderildi[symbol] = False
                     continue
 
-                # Aynı AL kararını tekrar gönderme.
-                if onceki_karar == karar:
+                # Sadece GERÇEKTEN Telegram'a ulaşmış aynı AL tekrar edilmez.
+                # AL hesaplandı ama mesaj gönderilemediyse sonraki taramada yeniden dene.
+                if son_al_gonderildi.get(symbol, False):
                     continue
 
                 gonderilecekler.append(a)
@@ -1720,11 +1735,15 @@ while True:
                     )
 
                 print(mesaj)
-                telegram_gonder(mesaj)
+                telegram_basarili = telegram_gonder(mesaj)
 
-                # Yalnızca gerçekten gönderilen AL'ları +%5 kâr bildirimi için takip et.
-                for _a in gonderilecekler:
-                    al_takip_baslat(_a)
+                if telegram_basarili:
+                    # Yalnızca Telegram'a gerçekten ulaşan AL'ı gönderildi say.
+                    for _a in gonderilecekler:
+                        son_al_gonderildi[_a["symbol"]] = True
+                        al_takip_baslat(_a)
+                else:
+                    print("[TELEGRAM RETRY] AL mesajı ulaşmadı; sonraki taramada yeniden denenecek.")
 
         # Ana tarama 60 sn; kâr bildirimi için açık AL'lar 15 sn'de bir kontrol edilir.
         beklenen = 0
