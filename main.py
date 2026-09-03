@@ -16,7 +16,7 @@ import requests
 import feedparser
 
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 CHAT_IDS = [1877715122, 2097448038]
 
