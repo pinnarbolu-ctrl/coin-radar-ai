@@ -19,13 +19,14 @@ import statistics
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
-CHAT_IDS = [2097448038]
+CHAT_IDS = [1877715122, 2097448038]
 
 TARAMA_SURESI = 60
 TAM_TARAMA_DONGUSU = 5          # 5 x 60 sn = yaklaşık 5 dk
 HIZLI_HAREKET_ESIGI = 0.40      # 1 dakikalık fiyat değişimi %0.40+ ise hemen derin analiz
 son_fiyatlar = {}
 tarama_sayaci = 0
+SON_PIYASA_MEDYAN_60 = 0.0  # Son tam taramadaki TRY coinleri 60dk medyanı
 
 # Early Capture V1: önceki taramadaki hızlanmayı ölçmek için hafıza.
 onceki_tarama = {}
@@ -435,6 +436,10 @@ def al_ogrenme_baslat(aday, btc_d, piyasa_fiyatlari, piyasa_medyan3, btc_giris):
         "devam": float(aday.get("devam_gucu", 0) or 0),
         "kalicilik": float(aday.get("kalicilik_skoru", 0) or 0),
         "kategori": aday.get("radar_kategori", ""),
+        # 60dk göreceli güç bonusu AL filtresi değildir; yalnız ölçüm/öncelik bilgisidir.
+        "goreceli_guc_bonus": int(aday.get("goreceli_guc_bonus", 0) or 0),
+        "coin_btc_60": round(float(aday.get("coin_btc_60", 0) or 0), 3),
+        "coin_piyasa_60": round(float(aday.get("coin_piyasa_60", 0) or 0), 3),
     }
     AL_OGRENME_KAYITLARI.append(kayit)
     _al_ogrenme_kaydet()
@@ -534,6 +539,11 @@ def rejim_raporu_gerekirse_gonder():
     piy_yatay = [x for x in gunluk if x.get("piyasa_rejim") == "Yatay"]
     piy_zayif = [x for x in gunluk if x.get("piyasa_rejim") == "Zayıf"]
 
+    # Yeni 60dk göreceli güç bonusunun gerçek AL sonuçlarını ayrı ölç.
+    rel2 = [x for x in gunluk if int(x.get("goreceli_guc_bonus", 0) or 0) >= 2]
+    rel1 = [x for x in gunluk if int(x.get("goreceli_guc_bonus", 0) or 0) == 1]
+    rel0 = [x for x in gunluk if int(x.get("goreceli_guc_bonus", 0) or 0) == 0]
+
     edge = [float(x.get("piyasa_ustu", 0) or 0) for x in gunluk if x.get("piyasa_ustu") is not None]
     ort_edge = sum(edge) / len(edge) if edge else 0.0
     piy = [float(x.get("piyasa_3s_getiri", 0) or 0) for x in gunluk]
@@ -563,6 +573,10 @@ def rejim_raporu_gerekirse_gonder():
         + _grup_satiri("Piyasa Güçlü", piy_guclu) + "\n"
         + _grup_satiri("Piyasa Yatay", piy_yatay) + "\n"
         + _grup_satiri("Piyasa Zayıf", piy_zayif) + "\n\n"
+        + "🎯 60dk GÖRECELİ GÜÇ BONUSU\n"
+        + _grup_satiri("Bonus +2 (BTC ve piyasa eşiği birlikte)", rel2) + "\n"
+        + _grup_satiri("Bonus +1 (eşiklerden biri)", rel1) + "\n"
+        + _grup_satiri("Bonus 0", rel0) + "\n\n"
         + f"🤖 Bot seçiciliği: {secicilik}\n"
         + f"🌍 Piyasa etkisi: {piyasa_etkisi}\n"
         + f"AL coinlerinin ortalama piyasa üstü 3s getirisi: %{ort_edge:+.2f}\n"
@@ -1286,6 +1300,7 @@ while True:
                 pass
 
         piyasa_fiyatlari = {}
+        piyasa_degisim1leri = []
         piyasa_degisim3leri = []
         adaylar = []
 
@@ -1354,6 +1369,7 @@ while True:
                 degisim24 = ((c[-1] - c[-24]) / c[-24]) * 100
 
                 piyasa_fiyatlari[symbol] = fiyat
+                piyasa_degisim1leri.append(degisim1)
                 piyasa_degisim3leri.append(degisim3)
 
                 # Mikro veri artık tüm piyasada çağrılmaz.
@@ -1679,8 +1695,32 @@ while True:
             except Exception as e:
                 print(f"Coin hata ({coin.get('pair', '?')}):", e)
 
+        # --------------------------------------------------
+        # 60DK BAĞIMSIZ GÖRECELİ GÜÇ BONUSU
+        # Öğrenme raporunda en güçlü eşikler:
+        #   Coin - BTC 60dk > +0.98
+        #   Coin - piyasa 60dk > +0.87
+        # Bu bonus AL kapısını / AI skorunu DEĞİŞTİRMEZ. Yalnız bilgi ve eşit
+        # Radar skorlarında öncelik amacıyla tutulur; gerçek sonucu AL öğrenmesi ölçer.
+        # Hızlı taramada piyasa medyanı yalnız hareket eden coinlerden sapmasın diye
+        # son TAM taramanın medyanı kullanılır.
+        if tam_tarama and piyasa_degisim1leri:
+            SON_PIYASA_MEDYAN_60 = statistics.median(piyasa_degisim1leri)
+        piyasa_medyan60 = SON_PIYASA_MEDYAN_60
+        btc60 = float(btc_d.get("1s", 0) or 0)
+
+        for _a in adaylar:
+            _coin60 = float(_a.get("degisim1", 0) or 0)
+            _btc_rel60 = _coin60 - btc60
+            _piy_rel60 = _coin60 - piyasa_medyan60
+            _bonus = int(_btc_rel60 > 0.98) + int(_piy_rel60 > 0.87)
+            _a["coin_btc_60"] = round(_btc_rel60, 2)
+            _a["coin_piyasa_60"] = round(_piy_rel60, 2)
+            _a["goreceli_guc_bonus"] = _bonus
+
         adaylar.sort(
-            key=lambda x: (x["radar_skoru"], x["genel_skor"]),
+            # Radar ana sıralama olarak kalır; bonus yalnız eşit Radar skorunda öncelik verir.
+            key=lambda x: (x["radar_skoru"], x.get("goreceli_guc_bonus", 0), x["genel_skor"]),
             reverse=True
         )
 
@@ -1919,6 +1959,13 @@ while True:
                     if hizlar:
                         baslik = "Erken yakalama" if a.get("orijinal_erken_aday") else "Hareket teyidi"
                         nedenler.insert(0, baslik + ": " + ", ".join(hizlar))
+
+                    rel_bonus = int(a.get("goreceli_guc_bonus", 0) or 0)
+                    if rel_bonus:
+                        nedenler.insert(0,
+                            f"60dk göreceli güç +{rel_bonus} "
+                            f"(BTC {a.get('coin_btc_60', 0):+.2f} / piyasa {a.get('coin_piyasa_60', 0):+.2f})"
+                        )
 
                     # 6+ gerçek olumlu neden varsa yalnızca Neden başına alarm koy.
                     # AL kararı veya filtrelerde hiçbir etkisi yok.
