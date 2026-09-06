@@ -19,7 +19,7 @@ import statistics
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
-CHAT_IDS = [1877715122, 2097448038]
+CHAT_IDS = [2097448038]
 
 TARAMA_SURESI = 60
 TAM_TARAMA_DONGUSU = 5          # 5 x 60 sn = yaklaşık 5 dk
