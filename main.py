@@ -53,7 +53,11 @@ TEPE_GERI_VERME = -1.4
 MIN_KAR_KORUMA = 2.5
 
 # AL Rejim / Seçicilik Öğrenmesi
-AL_OGRENME_DOSYA = os.getenv("AL_OGRENME_DOSYA", "al_ogrenme_rejim.json")
+# AL öğrenme verisini Railway Volume varsa kalıcı alanda tut.
+# AL_OGRENME_DOSYA env ile özel yol verilmişse onu kullanır.
+_RAILWAY_VOLUME = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+_AL_DEFAULT_DIR = _RAILWAY_VOLUME if _RAILWAY_VOLUME else "."
+AL_OGRENME_DOSYA = os.getenv("AL_OGRENME_DOSYA", os.path.join(_AL_DEFAULT_DIR, "al_ogrenme_rejim.json"))
 AL_OGRENME_SURESI = 3 * 60 * 60
 REJIM_RAPOR_ARALIGI = 24 * 60 * 60
 SON_REJIM_RAPOR_ZAMANI = time.time()
@@ -398,8 +402,12 @@ def _al_ogrenme_yukle():
 
 def _al_ogrenme_kaydet():
     try:
+        klasor = os.path.dirname(os.path.abspath(AL_OGRENME_DOSYA))
+        if klasor:
+            os.makedirs(klasor, exist_ok=True)
+        # Kümülatif öğrenme için geniş geçmiş tut.
         with open(AL_OGRENME_DOSYA, "w", encoding="utf-8") as f:
-            json.dump(AL_OGRENME_KAYITLARI[-2000:], f, ensure_ascii=False)
+            json.dump(AL_OGRENME_KAYITLARI[-20000:], f, ensure_ascii=False)
     except Exception as e:
         print("AL öğrenme dosyası yazılamadı:", e)
 
@@ -527,26 +535,29 @@ def rejim_raporu_gerekirse_gonder():
 
     SON_REJIM_RAPOR_ZAMANI = simdi
     tamam = [x for x in AL_OGRENME_KAYITLARI if x.get("tamamlandi") and x.get("son_getiri") is not None]
-    # Günlük rapor: son 24 saatte tamamlanan 3 saatlik AL gözlemleri.
+    # Ana rapor artık KÜMÜLATİF: eldeki tüm tamamlanmış AL kayıtlarını kullanır.
+    # Son 24 saat sayısı ayrıca bilgi olarak gösterilir.
     gunluk = [x for x in tamam if simdi - float(x.get("tamamlanma_zamani", 0) or 0) <= 24 * 60 * 60]
-    if not gunluk:
+    if not tamam:
         return
 
-    btc_guclu = [x for x in gunluk if x.get("btc_rejim") == "Güçlü"]
-    btc_yatay = [x for x in gunluk if x.get("btc_rejim") == "Yatay"]
-    btc_zayif = [x for x in gunluk if x.get("btc_rejim") == "Zayıf"]
-    piy_guclu = [x for x in gunluk if x.get("piyasa_rejim") == "Güçlü"]
-    piy_yatay = [x for x in gunluk if x.get("piyasa_rejim") == "Yatay"]
-    piy_zayif = [x for x in gunluk if x.get("piyasa_rejim") == "Zayıf"]
+    rapor_kayitlari = tamam
 
-    # Yeni 60dk göreceli güç bonusunun gerçek AL sonuçlarını ayrı ölç.
-    rel2 = [x for x in gunluk if int(x.get("goreceli_guc_bonus", 0) or 0) >= 2]
-    rel1 = [x for x in gunluk if int(x.get("goreceli_guc_bonus", 0) or 0) == 1]
-    rel0 = [x for x in gunluk if int(x.get("goreceli_guc_bonus", 0) or 0) == 0]
+    btc_guclu = [x for x in rapor_kayitlari if x.get("btc_rejim") == "Güçlü"]
+    btc_yatay = [x for x in rapor_kayitlari if x.get("btc_rejim") == "Yatay"]
+    btc_zayif = [x for x in rapor_kayitlari if x.get("btc_rejim") == "Zayıf"]
+    piy_guclu = [x for x in rapor_kayitlari if x.get("piyasa_rejim") == "Güçlü"]
+    piy_yatay = [x for x in rapor_kayitlari if x.get("piyasa_rejim") == "Yatay"]
+    piy_zayif = [x for x in rapor_kayitlari if x.get("piyasa_rejim") == "Zayıf"]
 
-    edge = [float(x.get("piyasa_ustu", 0) or 0) for x in gunluk if x.get("piyasa_ustu") is not None]
+    # 60dk göreceli güç bonusunu da tüm geçmiş tamamlanmış AL'larda ölç.
+    rel2 = [x for x in rapor_kayitlari if int(x.get("goreceli_guc_bonus", 0) or 0) >= 2]
+    rel1 = [x for x in rapor_kayitlari if int(x.get("goreceli_guc_bonus", 0) or 0) == 1]
+    rel0 = [x for x in rapor_kayitlari if int(x.get("goreceli_guc_bonus", 0) or 0) == 0]
+
+    edge = [float(x.get("piyasa_ustu", 0) or 0) for x in rapor_kayitlari if x.get("piyasa_ustu") is not None]
     ort_edge = sum(edge) / len(edge) if edge else 0.0
-    piy = [float(x.get("piyasa_3s_getiri", 0) or 0) for x in gunluk]
+    piy = [float(x.get("piyasa_3s_getiri", 0) or 0) for x in rapor_kayitlari]
     ort_piy = sum(piy) / len(piy) if piy else 0.0
 
     if ort_edge >= 1.0:
@@ -580,7 +591,8 @@ def rejim_raporu_gerekirse_gonder():
         + f"🤖 Bot seçiciliği: {secicilik}\n"
         + f"🌍 Piyasa etkisi: {piyasa_etkisi}\n"
         + f"AL coinlerinin ortalama piyasa üstü 3s getirisi: %{ort_edge:+.2f}\n"
-        + f"Örneklem: {len(gunluk)} tamamlanmış AL"
+        + f"Bugün tamamlanan AL: {len(gunluk)}\n"
+        + f"Toplam öğrenilmiş AL: {len(tamam)}"
     )
     print(mesaj)
     telegram_gonder(mesaj)
