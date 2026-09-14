@@ -25,10 +25,6 @@ TARAMA_SURESI = 60
 TAM_TARAMA_DONGUSU = 5          # 5 x 60 sn = yaklaşık 5 dk
 HIZLI_HAREKET_ESIGI = 0.40      # 1 dakikalık fiyat değişimi %0.40+ ise hemen derin analiz
 son_fiyatlar = {}
-# Fast Scan V2: her coin icin son birkac ticker fiyatini API cagrisi yapmadan hafizada tut.
-# Boylece tek dakikada %0.40 sicramayan ama 3-5 dakikada basamakli hizlanan hareketler de gorulur.
-son_ticker_gecmisi = {}
-TICKER_GECMIS_UZUNLUK = 6
 tarama_sayaci = 0
 SON_PIYASA_MEDYAN_60 = 0.0  # Son tam taramadaki TRY coinleri 60dk medyanı
 
@@ -47,15 +43,14 @@ GUC_IZLEME_SURESI = 5 * 60
 # Aynı kararın tekrar Telegram gönderimini engeller.
 son_ai_kararlar = {}
 
-# Sade birleşik: açık AL takibi + dinamik kâr koruma
+# Sade birleşik: açık AL takibi
 AL_TAKIP = {}
 POZISYON_TAKIP_SURESI = 15
 KAR_BILDIR_ESIK = 5.0
-KAR_KORU_BASLANGIC = 7.0
-KAR_KORU_GERI_CEKILME = 1.8
-TRAILING_10 = 3.0
-TRAILING_15 = 2.5
-TRAILING_20 = 2.0
+KAR_KORU_ORAN = 40
+ILK_ZARAR_KES = -0.8
+TEPE_GERI_VERME = -1.4
+MIN_KAR_KORUMA = 2.5
 
 # AL Rejim / Seçicilik Öğrenmesi
 # AL öğrenme verisini Railway Volume varsa kalıcı alanda tut.
@@ -319,7 +314,7 @@ def kalicilik_skoru_hesapla(aday):
 
 
 def al_takip_baslat(aday):
-    """Gerçek AL mesajı gönderilen coini dinamik kâr koruma için takip eder."""
+    """Gerçek AL mesajı gönderilen coini yalnızca +%5 kâr bildirimi için takip eder."""
     symbol = aday.get("symbol")
     fiyat = float(aday.get("fiyat", 0) or 0)
     if not symbol or fiyat <= 0:
@@ -332,30 +327,14 @@ def al_takip_baslat(aday):
     AL_TAKIP[symbol] = {
         "aktif": True,
         "giris": fiyat,
-        "tepe": fiyat,
-        "max_getiri": 0.0,
         "kar_bildirildi": False,
-        "kar_koru_bildirildi": False,
-        "sat_bildirildi": False,
     }
-
-
-def _trailing_esigi(max_getiri):
-    """Kâr büyüdükçe izin verilen tepe geri çekilmesini daraltır."""
-    if max_getiri >= 20.0:
-        return TRAILING_20
-    if max_getiri >= 15.0:
-        return TRAILING_15
-    if max_getiri >= 10.0:
-        return TRAILING_10
-    return None
 
 
 def al_takip_guncelle(ticker):
     """
-    Otomatik emir vermez. İlk AL fiyatından sonra görülen en yüksek fiyatı takip eder.
-    +%5'te bilgi, +%7 sonrası geri çekilmede KÂRI KORU, +%10 ve üzeri
-    kazançlarda dinamik trailing kırılırsa SAT / KÂR AL uyarısı üretir.
+    Otomatik SAT/ÇIK yok.
+    Sadece ilk AL fiyatına göre +%5 görülünce tek seferlik ara kâr mesajı yollar.
     """
     if not AL_TAKIP:
         return
@@ -371,7 +350,7 @@ def al_takip_guncelle(ticker):
             pass
 
     for symbol, p in AL_TAKIP.items():
-        if not p.get("aktif"):
+        if not p.get("aktif") or p.get("kar_bildirildi"):
             continue
 
         fiyat = fiyatlar.get(symbol)
@@ -379,62 +358,15 @@ def al_takip_guncelle(ticker):
             continue
 
         giris = float(p.get("giris", fiyat))
-        tepe = float(p.get("tepe", giris))
-
-        if fiyat > tepe:
-            tepe = fiyat
-            p["tepe"] = fiyat
-
         getiri = _pct(fiyat, giris)
-        max_getiri = max(float(p.get("max_getiri", 0.0)), _pct(tepe, giris))
-        p["max_getiri"] = max_getiri
-        tepe_geri = max(0.0, -_pct(fiyat, tepe)) if tepe > 0 else 0.0
 
-        # İlk kâr bölgesi mesajı: yalnızca bir kez.
-        if getiri >= KAR_BILDIR_ESIK and not p.get("kar_bildirildi"):
+        if getiri >= KAR_BILDIR_ESIK:
             p["kar_bildirildi"] = True
             mesaj = (
                 f"💰 +%5 KÂR BÖLGESİ - {symbol}\n"
                 f"İlk AL: {giris:.4f} | Güncel: {fiyat:.4f}\n"
-                f"Getiri: %{getiri:+.2f} | Görülen tepe: %{max_getiri:+.2f}\n"
-                f"Not: Çık emri değil; dinamik kâr koruma artık zirveyi takip ediyor."
-            )
-            print(mesaj)
-            telegram_gonder(mesaj)
-
-        # +%10 ve üzeri kârda dinamik trailing kırılırsa güçlü çıkış uyarısı.
-        trailing = _trailing_esigi(max_getiri)
-        if (
-            trailing is not None
-            and tepe_geri >= trailing
-            and not p.get("sat_bildirildi")
-        ):
-            p["sat_bildirildi"] = True
-            p["aktif"] = False
-            mesaj = (
-                f"🔴 SAT / KÂR AL - {symbol}\n"
-                f"İlk AL: {giris:.4f} | Tepe: {tepe:.4f} | Güncel: {fiyat:.4f}\n"
-                f"Maks. kâr: %{max_getiri:+.2f} | Şu an: %{getiri:+.2f}\n"
-                f"Zirveden geri çekilme: %{tepe_geri:.2f} (trailing %{trailing:.1f})\n"
-                f"Not: Otomatik emir değildir; kârı geri vermemek için güçlü çıkış uyarısı."
-            )
-            print(mesaj)
-            telegram_gonder(mesaj)
-            continue
-
-        # +%7 sonrası ilk anlamlı geri çekilmede bir kez erken kâr koruma uyarısı.
-        if (
-            max_getiri >= KAR_KORU_BASLANGIC
-            and tepe_geri >= KAR_KORU_GERI_CEKILME
-            and not p.get("kar_koru_bildirildi")
-        ):
-            p["kar_koru_bildirildi"] = True
-            mesaj = (
-                f"⚠️ KÂRI KORU - {symbol}\n"
-                f"İlk AL: {giris:.4f} | Tepe: {tepe:.4f} | Güncel: {fiyat:.4f}\n"
-                f"Maks. kâr: %{max_getiri:+.2f} | Şu an: %{getiri:+.2f}\n"
-                f"Zirveden geri çekilme: %{tepe_geri:.2f}\n"
-                f"Not: Otomatik emir değildir; kârın bir kısmını güvenceye alma uyarısıdır."
+                f"Getiri: %{getiri:+.2f}\n"
+                f"Not: Çık emri değil; kârı değerlendirmek / çıkışa hazırlanmak için ara uyarı."
             )
             print(mesaj)
             telegram_gonder(mesaj)
@@ -1406,25 +1338,11 @@ while True:
 
                 onceki_fiyat = son_fiyatlar.get(symbol)
                 hizli_degisim = 0.0
-                hizli_degisim3 = 0.0
-                hizli_degisim5 = 0.0
 
                 if ticker_fiyat > 0 and onceki_fiyat and onceki_fiyat > 0:
                     hizli_degisim = ((ticker_fiyat - onceki_fiyat) / onceki_fiyat) * 100
 
-                # Sadece ticker verisiyle 3-5 dakikalik basamakli hizlanmayi izle.
-                # Ek BTCTurk mum istegi yok; API yukunu artirmaz.
-                gecmis = son_ticker_gecmisi.setdefault(symbol, [])
                 if ticker_fiyat > 0:
-                    gecmis.append(ticker_fiyat)
-                    if len(gecmis) > TICKER_GECMIS_UZUNLUK:
-                        del gecmis[:-TICKER_GECMIS_UZUNLUK]
-
-                    if len(gecmis) >= 4 and gecmis[-4] > 0:
-                        hizli_degisim3 = ((ticker_fiyat - gecmis[-4]) / gecmis[-4]) * 100
-                    if len(gecmis) >= 6 and gecmis[-6] > 0:
-                        hizli_degisim5 = ((ticker_fiyat - gecmis[-6]) / gecmis[-6]) * 100
-
                     son_fiyatlar[symbol] = ticker_fiyat
 
                 # 5 dakikalık tam taramalar arasında:
@@ -1438,30 +1356,12 @@ while True:
                 if izleme_bitis and not havuzda:
                     guc_izleme_havuzu.pop(symbol, None)
 
-                # Fast Scan V2:
-                # Tek dakikada %0.40 yapmasa bile 3 dk +%0.75 veya 5 dk +%1.10
-                # basamakli hizlanan coin derin incelemeye girer. TT tipi hareketleri kacirmamak icin.
-                ticker_basamak_hizli = (hizli_degisim3 >= 0.75 or hizli_degisim5 >= 1.10)
-
-                if (
-                    not tam_tarama
-                    and abs(hizli_degisim) < HIZLI_HAREKET_ESIGI
-                    and not ticker_basamak_hizli
-                    and not havuzda
-                ):
+                if not tam_tarama and abs(hizli_degisim) < HIZLI_HAREKET_ESIGI and not havuzda:
                     continue
 
                 if not tam_tarama:
-                    if havuzda and abs(hizli_degisim) < HIZLI_HAREKET_ESIGI and not ticker_basamak_hizli:
-                        kaynak = "HAVUZ"
-                    elif ticker_basamak_hizli and abs(hizli_degisim) < HIZLI_HAREKET_ESIGI:
-                        kaynak = "HIZLI3"
-                    else:
-                        kaynak = "HIZLI"
-                    print(
-                        f"[{kaynak}] {symbol} | 1dk: %{hizli_degisim:.2f} | "
-                        f"3dk: %{hizli_degisim3:.2f} | 5dk: %{hizli_degisim5:.2f}"
-                    )
+                    kaynak = "HAVUZ" if havuzda and abs(hizli_degisim) < HIZLI_HAREKET_ESIGI else "HIZLI"
+                    print(f"[{kaynak}] {symbol} | 1dk: %{hizli_degisim:.2f}")
 
                 d = veri_getir(symbol, 24)
                 o = d.get("o", [])
@@ -1687,16 +1587,7 @@ while True:
                     and degisim3 <= 10
                     and degisim1 <= 6
                     and (
-                        # Ani tek-dakika hizlanma
-                        (hizli_degisim >= 0.25 and hacim_kat >= 1.15 and btc_fark3 >= -1.0)
-                        # TT tipi basamakli hareket: tek mum patlamasi olmadan 3-5 dk birikimli ivme
-                        or (
-                            (hizli_degisim3 >= 0.70 or hizli_degisim5 >= 1.05)
-                            and hacim_kat >= 1.15
-                            and degisim1 >= -0.25
-                            and btc_fark3 >= -1.0
-                        )
-                        # Saatlik motor da yeni guclenmeye baslamissa
+                        (hizli_degisim >= 0.30 and hacim_kat >= 1.20 and btc_fark3 >= -1.0)
                         or (
                             0.70 <= degisim1 <= 4.5
                             and 0.40 <= degisim3 <= 7.0
@@ -1789,9 +1680,6 @@ while True:
                     "erken_aday": erken_aday,
                     "assistant_ana_aday": assistant_ana_aday,
                     "mikro_on_alarm": mikro_on_alarm,
-                    "hizli_degisim1": round(hizli_degisim, 3),
-                    "hizli_degisim3": round(hizli_degisim3, 3),
-                    "hizli_degisim5": round(hizli_degisim5, 3),
                     "mikro_aday": mikro_aday,
                     "mikro": mikro,
                     "guc_havuzu_adayi": guc_havuzu_adayi,
@@ -1867,8 +1755,7 @@ while True:
         mikro_on_top = sorted(
             [a for a in adaylar if a.get("mikro_on_alarm")],
             key=lambda x: (
-                x.get("hizli_degisim3", 0),
-                x.get("hizli_degisim5", 0),
+                x.get("degisim1", 0),
                 x.get("hacim", 0),
                 x.get("radar_skoru", 0),
             ),
@@ -2118,7 +2005,7 @@ while True:
                         f"Fiyat {round(a['fiyat'], 4)} | Hacim {a['hacim']}x | Radar {a['radar_skoru']}/100 | BTC 3s %{round(btc, 2)}\n"
                         f"{mikro_satir}"
                         f"EMA {ema_yon} | RSI {teknik['rsi']} | ADX {teknik['adx']} | MACD {macd_yon}\n\n"
-                        f"📌 Takip: AL anlık | +%5 kâr bölgesi | zirve/trailing kâr koruma\n"
+                        f"📌 Takip: AL anlık | +%5'te sadece kâr ara uyarısı\n"
                         f"{neden_alarm}Neden: {neden}\n\n"
                     )
 
