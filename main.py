@@ -3669,9 +3669,87 @@ while True:
                         if _piyasa_geri_verme > 0 else ""
                     )
 
+                    # EN İYİ PROFİL EŞLEŞME ORANI
+                    # Bu skor yalnız mesaj işaretidir; AL filtresini veya motor kararını değiştirmez.
+                    _kalicilik = float(a.get("kalicilik_skoru", 0) or 0)
+                    _rel = int(rel_bonus or 0)
+                    _risk_yuksek = str(risk).strip().lower() == "yüksek"
+                    _hacim = float(a.get("hacim", 0) or 0)
+                    _adx_num = float(_adx or 0)
+
+                    _profil_puan = 0
+
+                    # 1) Devam Gücü — en önemli blok (20)
+                    if _al_odak_puani >= 85:
+                        _profil_puan += 20
+                    elif _al_odak_puani >= 80:
+                        _profil_puan += 16
+                    elif _al_odak_puani >= 72:
+                        _profil_puan += 10
+
+                    # 2) Göreceli güç +2 (15)
+                    if _rel >= 2:
+                        _profil_puan += 15
+                    elif _rel >= 1:
+                        _profil_puan += 8
+
+                    # 3) Sağlıklı kalıcılık 88–94 (15)
+                    if 88 <= _kalicilik <= 94:
+                        _profil_puan += 15
+                    elif 84 <= _kalicilik <= 97:
+                        _profil_puan += 8
+
+                    # 4) Erken yakalama (10)
+                    if _erken_yakalama_puani >= 72:
+                        _profil_puan += 10
+                    elif _erken_yakalama_puani >= 60:
+                        _profil_puan += 7
+
+                    # 5) BTC şok yok / çok düşük (10)
+                    if _btc_sok_puani < 8:
+                        _profil_puan += 10
+                    elif _btc_sok_puani < 18:
+                        _profil_puan += 6
+
+                    # 6) Piyasa devamı (10)
+                    if "TEYİTLİ" in str(_piyasa_devam_etiket):
+                        _profil_puan += 10
+                    elif "SAHTE KIRILIM" not in str(_piyasa_devam_etiket):
+                        _profil_puan += 6
+
+                    # 7) Risk (5)
+                    if not _risk_yuksek:
+                        _profil_puan += 5
+
+                    # 8) Trend gücü / ADX (5)
+                    if _adx_num >= 30:
+                        _profil_puan += 5
+                    elif _adx_num >= 27:
+                        _profil_puan += 3
+
+                    # 9) EMA + MACD birlikte olumlu (5)
+                    if _ema_yon == "Yukarı" and _macd_yon == "Pozitif":
+                        _profil_puan += 5
+                    elif _ema_yon == "Yukarı" or _macd_yon == "Pozitif":
+                        _profil_puan += 2
+
+                    # 10) Hacim desteği (5)
+                    if _hacim >= 3.0:
+                        _profil_puan += 5
+                    elif _hacim >= 1.8:
+                        _profil_puan += 3
+
+                    _profil_puan = min(100, int(round(_profil_puan)))
+
+                    if _profil_puan >= 90:
+                        _kalite_isareti = f"💎 EN İYİ PROFİLE %{_profil_puan} UYUM\n"
+                    else:
+                        _kalite_isareti = ""
+
                     # Eski Assistant gibi düz ve hızlı okunur; V11'in önemli yeni bilgileri üstte kalır.
                     mesaj = (
-                        f"{_sira_prefix} {gorunen_coin} | {a.get('radar_kategori', '')} + 🟢 AL{_onceki_5_etiket}\n\n"
+                        f"{_sira_prefix} {gorunen_coin} | {a.get('radar_kategori', '')} + 🟢 AL{_onceki_5_etiket}\n"\
+                        f"{_kalite_isareti}\n"
                         f"{_btc_sok_satir}"
                         f"🎯 Devam Gücü: {_al_odak_puani}/100 | {_al_odak_etiket}\n"
                         f"⚡ Erken Yakalama: {_erken_yakalama_puani}/100 | {_erken_yakalama_etiket}\n"
