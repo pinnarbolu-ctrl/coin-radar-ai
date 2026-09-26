@@ -3644,88 +3644,50 @@ while True:
                     a["piyasa_geri_verme"] = float(_piyasa_geri_verme)
                     a["piyasa_pozitif_oran"] = float(_piyasa_pozitif_oran)
 
-                    # İki ana sütun: solda Skorlar / sağda Piyasa; altta Momentum.
-                    # Her sütunun kendi bilgileri alt alta kalır.
-                    _sol1 = [
-                        f"AI {a.get('ai_skoru', 0)}",
-                        f"Risk {risk}",
-                        f"Erken {a.get('erken_puan', 0)}",
-                        f"Giriş {a.get('giris_kalitesi', 0)}",
-                        f"Devam {a.get('devam_gucu', 0)}",
-                        f"Kalıcılık {a.get('kalicilik_skoru', 0)}",
-                        f"Öğrenme {a.get('ogrenme_uyum', 0)}",
-                    ]
-                    _sag1 = [
-                        f"Fiyat {round(a['fiyat'], 4)}",
-                        f"Hacim {a['hacim']}x",
-                        f"Radar {a['radar_skoru']}/100",
-                        f"BTC 3s %{_btc3_anlik:+.2f}",
-                        f"Piyasa 3s %{_piyasa3_anlik:+.2f}",
-                        f"Destek {_destek_etiket}",
-                    ]
-                    _sol2 = [
-                        f"1dk %{_d1}",
-                        f"3dk %{_d3}",
-                        f"5dk %{_d5}",
-                        f"10dk %{_d10}",
-                    ]
-                    # Teknik göstergeler sütunda tekrar gösterilmez.
-                    # EMA / RSI / ADX / MACD ile ilgili en fazla 4 teknik neden zaten
-                    # a["nedenler"] içinde bulunur ve aşağıdaki Neden bölümünde görünür.
-
-                    def _iki_sutun_baslik_ve_satirlar(sol_baslik, sag_baslik, sol, sag, genislik=18):
-                        # Telegram normal yazı tipi orantılı olduğu için boşluklarla sütunlar kayıyordu.
-                        # Bu blok HTML <pre> içinde monospace gönderilir; sağ sütun her satırda aynı hizada başlar.
-                        sat = [f"{sol_baslik:<{genislik}}│ {sag_baslik}"]
-                        n = max(len(sol), len(sag))
-                        for i in range(n):
-                            l = sol[i] if i < len(sol) else ""
-                            r = sag[i] if i < len(sag) else ""
-                            sat.append(f"{l:<{genislik}}│ {r}")
-                        return "\n".join(sat)
-
-                    _blok_ust = _iki_sutun_baslik_ve_satirlar("📊 SKORLAR", "📈 PİYASA", _sol1, _sag1)
-                    # Alt bölüm artık yalnız momentumdur; Teknik tekrarları Neden kısmındadır.
-                    _blok_alt = "⏱ MOMENTUM\n" + "\n".join(_sol2)
-
-                    # Aynı coin 48 saat içinde yeniden AL verirse sıra numarası devam eder.
-                    # 48 saatten eski geçmiş yeni döngü sayılır ve tekrar 1️⃣ başlar.
+                    # V11 SADE MESAJ V1
+                    # Motor/filtre/öğrenme mantığına dokunmaz; yalnız Telegram sunumunu sadeleştirir.
                     _sinyal_sira, _onceki_5 = _sinyal_sira_hazirla(a.get("symbol", ""))
                     _sira_prefix = _sira_etiketi(_sinyal_sira)
                     _onceki_5_etiket = " | Önceki +%5 ✅" if _onceki_5 else ""
 
-                    # Yalnız bu AL mesajı HTML olarak gönderilir. Dinamik alanlar escape edilir.
-                    # Böylece <pre> bloğunda iki sütun gerçekten düz görünür; diğer Telegram mesajlarına dokunulmaz.
-                    mesaj_html = (
-                        f"{html.escape(_sira_prefix)} {html.escape(kalin_coin_yazisi(gorunen_coin))} | {html.escape(str(a.get('radar_kategori', '')))} + 🟢 AL{html.escape(_onceki_5_etiket)}\n\n"
-                        f"{(html.escape(_btc_sok_etiket) + ' | ' + 'BTC 3s ' + format(_btc3, '+.2f') + '% | Piyasa 3s ' + format(_piyasa3, '+.2f') + '%' + chr(10)) if _btc_sok_etiket else ''}"
-                        f"🌍 Piyasa Devamı: {html.escape(_piyasa_devam_etiket)}"
-                        f"{(' | Geri verme ' + format(_piyasa_geri_verme, '.2f') + '%') if _piyasa_geri_verme > 0 else ''}\n"
-                        f"⚡ ERKEN YAKALAMA: {_erken_yakalama_puani}/100 | {html.escape(_erken_yakalama_etiket)}\n"
-                        f"🎯 DEVAM GÜCÜ: {_al_odak_puani}/100 | {html.escape(_al_odak_etiket)}\n"
-                        f"⚡ Devam {a.get('devam_gucu', 0)} | Rel +{int(rel_bonus or 0)} | Kalıcılık {a.get('kalicilik_skoru', 0)}\n"
-                        f"🔥 Genel Güç: {_genel_guc}/100 | 🌍 Piyasa: {html.escape(_destek_etiket)}\n\n"
-                        f"<pre>{html.escape(_blok_ust)}</pre>\n"
-                        f"<pre>{html.escape(_blok_alt)}</pre>\n"
-                        f"{html.escape(neden_alarm)}📌 Önemli Neden ({_onemli_neden_sayisi}/7): {html.escape(_neden_temiz)}\n"
+                    _rsi = teknik.get("rsi")
+                    _adx = teknik.get("adx")
+                    _ema_yon = "Yukarı" if teknik.get("ema20") is not None and teknik.get("ema50") is not None and teknik.get("ema20") > teknik.get("ema50") else "Aşağı"
+                    _macd_yon = "Pozitif" if teknik.get("macd_hist") is not None and teknik.get("macd_hist") > 0 else "Negatif"
+
+                    _rsi_txt = "NA" if _rsi is None else f"{float(_rsi):.1f}"
+                    _adx_txt = "NA" if _adx is None else f"{float(_adx):.1f}"
+
+                    _btc_sok_satir = ""
+                    if _btc_sok_etiket:
+                        _btc_sok_satir = (
+                            f"{_btc_sok_etiket} | BTC 3s %{_btc3:+.2f} | Piyasa 3s %{_piyasa3:+.2f}\n"
+                        )
+
+                    _geri_txt = (
+                        f" | Geri verme %{_piyasa_geri_verme:.2f}"
+                        if _piyasa_geri_verme > 0 else ""
                     )
 
-                    # Konsolda düz metin; Telegram'da hizalı monospace sütun.
+                    # Eski Assistant gibi düz ve hızlı okunur; V11'in önemli yeni bilgileri üstte kalır.
                     mesaj = (
-                        f"{_sira_prefix} {kalin_coin_yazisi(gorunen_coin)} | {a.get('radar_kategori', '')} + 🟢 AL{_onceki_5_etiket}\n\n"
-                        f"{(_btc_sok_etiket + ' | BTC 3s ' + format(_btc3, '+.2f') + '% | Piyasa 3s ' + format(_piyasa3, '+.2f') + '%' + chr(10)) if _btc_sok_etiket else ''}"
-                        f"🌍 Piyasa Devamı: {_piyasa_devam_etiket}"
-                        f"{(' | Geri verme ' + format(_piyasa_geri_verme, '.2f') + '%') if _piyasa_geri_verme > 0 else ''}\n"
-                        f"⚡ ERKEN YAKALAMA: {_erken_yakalama_puani}/100 | {_erken_yakalama_etiket}\n"
-                        f"🎯 DEVAM GÜCÜ: {_al_odak_puani}/100 | {_al_odak_etiket}\n"
-                        f"⚡ Devam {a.get('devam_gucu', 0)} | Rel +{int(rel_bonus or 0)} | Kalıcılık {a.get('kalicilik_skoru', 0)}\n"
-                        f"🔥 Genel Güç: {_genel_guc}/100 | 🌍 Piyasa: {_destek_etiket}\n\n"
-                        f"{_blok_ust}\n\n"
-                        f"{_blok_alt}\n\n"
-                        f"{neden_alarm}📌 Önemli Neden ({_onemli_neden_sayisi}/7): {_neden_temiz}\n"
+                        f"{_sira_prefix} {gorunen_coin} | {a.get('radar_kategori', '')} + 🟢 AL{_onceki_5_etiket}\n\n"
+                        f"{_btc_sok_satir}"
+                        f"🎯 Devam Gücü: {_al_odak_puani}/100 | {_al_odak_etiket}\n"
+                        f"⚡ Erken Yakalama: {_erken_yakalama_puani}/100 | {_erken_yakalama_etiket}\n"
+                        f"🌍 Piyasa: {_destek_etiket} | Devam: {_piyasa_devam_etiket}{_geri_txt}\n"
+                        f"⚡ Devam {a.get('devam_gucu', 0)} | Rel +{int(rel_bonus or 0)} | Kalıcılık {a.get('kalicilik_skoru', 0)}\n\n"
+                        f"AI: {a.get('ai_skoru', 0)} | Risk: {risk}\n"
+                        f"Radar: {a.get('radar_skoru', 0)}/100 | Fiyat: {round(a.get('fiyat', 0), 4)} | Hacim: {a.get('hacim', 0)}x\n"
+                        f"1dk: %{_d1} | 3dk: %{_d3} | 5dk: %{_d5} | 10dk: %{_d10}\n"
+                        f"BTC 3s: %{_btc3_anlik:+.2f} | Piyasa 3s: %{_piyasa3_anlik:+.2f}\n"
+                        f"EMA: {_ema_yon} | RSI: {_rsi_txt} | ADX: {_adx_txt} | MACD: {_macd_yon}\n\n"
+                        f"{neden_alarm}Neden: {_neden_temiz}\n"
                     )
+
+                    # Telegram'da da aynı sade metin kullanılır.
                     print(mesaj)
-                    telegram_gonder(mesaj_html, parse_mode="HTML")
+                    telegram_gonder(mesaj)
                     # Mesaj gönderildikten sonra sıra olayını kalıcı kayda al.
                     a["_sinyal_event_id"] = _sinyal_sira_ekle(a.get("symbol", ""), a.get("fiyat", 0))
                     # Gönderilmiş her AL için fiyat devamını izler; AL kararını değiştirmez.
