@@ -95,8 +95,23 @@ GELISTIRME_YUKSEK_N = 100
 
 STRATEJI_SURUMU = "V11_ERKEN_YAKALA_DEVAM_GUCU"
 
-# 24 saatlik +%5 yakalama başarı raporu
-YUZDE5_RAPOR_ARALIGI = 24 * 60 * 60
+# 3 günlük ortak karşılaştırma raporu
+
+# ORTAK 3 GÜNLÜK RAPOR TAKVİMİ
+# İlk karşılaştırma: 06.10.2026 08:00 Türkiye saati (UTC+3).
+# Sonraki raporlar her 3 günde bir yine 08:00'de.
+ILK_3GUN_RAPOR_TS = 1791262800.0
+YUZDE5_RAPOR_ARALIGI = 3 * 24 * 60 * 60
+
+def _planli_3gun_rapor_zamani(simdi, meta):
+    """İlk raporu 06.10.2026 08:00 TR'de, sonra her 72 saatte bir gönderir."""
+    if simdi < ILK_3GUN_RAPOR_TS:
+        return False, ILK_3GUN_RAPOR_TS
+    idx = int((simdi - ILK_3GUN_RAPOR_TS) // YUZDE5_RAPOR_ARALIGI)
+    planli = ILK_3GUN_RAPOR_TS + idx * YUZDE5_RAPOR_ARALIGI
+    son_planli = float(meta.get("son_planli_rapor_ts", 0) or 0)
+    return son_planli < planli, planli
+
 YUZDE5_RAPOR_ETIKETI = "V11 Erken+Devam"
 _YUZDE5_META_DOSYA = os.path.join(_AL_DEFAULT_DIR, "yuzde5_basariraporu_v11.json")
 
@@ -125,17 +140,17 @@ if not _YUZDE5_META.get("baslangic"):
     _yuzde5_meta_kaydet(_YUZDE5_META)
 
 def yuzde5_basariraporu_gerekirse_gonder():
-    """Her 24 saatte yalnız bu strateji sürümünün +%5 yakalama oranını raporlar."""
+    """Her 3 günde bir saat 08:00 TR'de V11 performansını ortak cetvelle raporlar."""
     global _YUZDE5_META
+
     simdi = time.time()
-    son_rapor = float(_YUZDE5_META.get("son_rapor", _YUZDE5_META.get("baslangic", simdi)) or simdi)
-    if simdi - son_rapor < YUZDE5_RAPOR_ARALIGI:
+    gonder, planli_ts = _planli_3gun_rapor_zamani(simdi, _YUZDE5_META)
+    if not gonder:
         return
 
-    pencere_bas = son_rapor
-    pencere_son = simdi
+    pencere_bas = planli_ts - YUZDE5_RAPOR_ARALIGI
+    pencere_son = planli_ts
 
-    # Bu 24 saat içinde başlayan, bu strateji sürümüne ait sinyaller.
     tum = [
         x for x in AL_OGRENME_KAYITLARI
         if x.get("strateji_surumu") == STRATEJI_SURUMU
@@ -145,28 +160,46 @@ def yuzde5_basariraporu_gerekirse_gonder():
     tamam = [x for x in tum if x.get("tamamlandi")]
     acik = [x for x in tum if not x.get("tamamlandi")]
     basarili = [x for x in tamam if float(x.get("max_getiri", 0) or 0) >= 5.0]
-    basarisiz = [x for x in tamam if float(x.get("max_getiri", 0) or 0) < 5.0]
+    yanlis = [
+        x for x in tamam
+        if float(x.get("max_getiri", 0) or 0) < 5.0
+        and float(x.get("min_getiri", 0) or 0) <= -2.5
+    ]
+    notr = [x for x in tamam if x not in basarili and x not in yanlis]
 
-    oran = (len(basarili) / len(tamam) * 100.0) if tamam else 0.0
+    ham_oran = (len(basarili) / len(tamam) * 100.0) if tamam else 0.0
+    yanlis_oran = (len(yanlis) / len(tamam) * 100.0) if tamam else 0.0
+    net_taban = len(basarili) + len(yanlis)
+    net_kalite = (len(basarili) / net_taban * 100.0) if net_taban else 0.0
     ort_tepe = (
         sum(float(x.get("max_getiri", 0) or 0) for x in tamam) / len(tamam)
         if tamam else 0.0
     )
+    ort_dip = (
+        sum(float(x.get("min_getiri", 0) or 0) for x in tamam) / len(tamam)
+        if tamam else 0.0
+    )
 
     mesaj = (
-        f"📊 24 SAATLİK +%5 YAKALAMA RAPORU — {YUZDE5_RAPOR_ETIKETI}\n\n"
+        f"📊 3 GÜNLÜK +%5 / YANLIŞ SİNYAL RAPORU — {YUZDE5_RAPOR_ETIKETI}\n\n"
         f"Tamamlanan sinyal: {len(tamam)}\n"
-        f"+%5 yapan: {len(basarili)}\n"
-        f"+%5 yapamayan: {len(basarisiz)}\n"
-        f"🎯 +%5 başarı: %{oran:.1f}\n"
-        f"Ortalama tepe getiri: %{ort_tepe:+.2f}\n"
-        f"Henüz tamamlanmayan: {len(acik)}\n\n"
-        f"Not: Başarı = AL fiyatından sonra izleme süresi içinde en az +%5 tepe görmek."
+        f"✅ +%5 yapan: {len(basarili)}\n"
+        f"❌ Yanlış sinyal (-%2.5): {len(yanlis)}\n"
+        f"➖ Nötr/yetersiz: {len(notr)}\n"
+        f"🎯 Ham +%5 başarı: %{ham_oran:.1f}\n"
+        f"⚠️ Yanlış sinyal oranı: %{yanlis_oran:.1f}\n"
+        f"🧠 Net sinyal kalitesi: %{net_kalite:.1f}\n"
+        f"📈 Ortalama tepe getiri: %{ort_tepe:+.2f}\n"
+        f"📉 Ortalama dip getiri: %{ort_dip:+.2f}\n"
+        f"⏳ Henüz tamamlanmayan: {len(acik)}\n\n"
+        f"Not: Başarı = AL sonrası 3 saat içinde en az +%5 tepe. "
+        f"Yanlış = +%5 görmeden en az -%2.5 ters hareket."
     )
     print(mesaj)
     telegram_gonder(mesaj)
 
-    _YUZDE5_META["son_rapor"] = simdi
+    _YUZDE5_META["son_rapor"] = planli_ts
+    _YUZDE5_META["son_planli_rapor_ts"] = planli_ts
     _yuzde5_meta_kaydet(_YUZDE5_META)
 
 
