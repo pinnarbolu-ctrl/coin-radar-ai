@@ -103,6 +103,11 @@ STRATEJI_SURUMU = "V11_ERKEN_YAKALA_DEVAM_GUCU"
 V11_FILTRE_AI_ESIK = 83.69
 V11_FILTRE_DEVAM_ESIK = 71.20
 V11_FILTRE_YANLIS_TEPKI = -1.5
+V11_ASIRI_REL_ESIK = 4.0
+V11_TEMIZ_MOM_MIN_POZITIF = 3
+V11_TEKRAR_SOGUMA = 30 * 60
+V11_TEKRAR_HIT5_BEKLEME = 3 * 60 * 60
+V11_TEKRAR_YENI_HAREKET = 1.5
 
 # 3 günlük ortak karşılaştırma raporu
 
@@ -213,6 +218,12 @@ def yuzde5_basariraporu_gerekirse_gonder():
         x for x in tum
         if not x.get("tamamlandi") and bool(x.get("v11_filtre_adayi"))
     ]
+    asiri_rel_yolu = [
+        x for x in filtre_tamam if bool(x.get("v11_yol_asiri_rel"))
+    ]
+    temiz_mom_yolu = [
+        x for x in filtre_tamam if bool(x.get("v11_yol_temiz_momentum"))
+    ]
     eleme_orani = (
         len(filtre_veto) / len(filtre_tamam) * 100.0
         if filtre_tamam else 0.0
@@ -241,10 +252,18 @@ def yuzde5_basariraporu_gerekirse_gonder():
         f"+%3 %{_hedef_orani(filtre_kabul, 3):.1f} | +%5 %{_hedef_orani(filtre_kabul, 5):.1f}\n"
         f"• Elenen: +%2 %{_hedef_orani(filtre_veto, 2):.1f} | "
         f"+%3 %{_hedef_orani(filtre_veto, 3):.1f} | +%5 %{_hedef_orani(filtre_veto, 5):.1f}\n"
+        f"• BEAM yolu (60dk iki fark ≥+{V11_ASIRI_REL_ESIK:.0f}): n={len(asiri_rel_yolu)} | "
+        f"+%2 %{_hedef_orani(asiri_rel_yolu, 2):.1f} | "
+        f"+%3 %{_hedef_orani(asiri_rel_yolu, 3):.1f} | "
+        f"+%5 %{_hedef_orani(asiri_rel_yolu, 5):.1f}\n"
+        f"• HOT yolu (3/5dk pozitif, 4 vadenin ≥{V11_TEMIZ_MOM_MIN_POZITIF}'ü pozitif): "
+        f"n={len(temiz_mom_yolu)} | +%2 %{_hedef_orani(temiz_mom_yolu, 2):.1f} | "
+        f"+%3 %{_hedef_orani(temiz_mom_yolu, 3):.1f} | "
+        f"+%5 %{_hedef_orani(temiz_mom_yolu, 5):.1f}\n"
         f"• +%2 hareket koruma %{iki_koruma:.1f} | "
         f"elenenlerde yanlış tepki %{veto_yanlis_oran:.1f}\n"
-        "• Filtre: göreceli güç yok + AI/Devam birlikte zayıf + ek risk/sönme. "
-        "Düşük ADX tek başına elemez."
+        "• BEAM/HOT yolu doğrudan korunur. Diğerlerinde parçalı/sönen momentum "
+        "ve birleşik zayıflık ayıklanır; düşük ADX tek başına elemez."
     )
 
     mesaj = (
@@ -1054,6 +1073,9 @@ def al_ogrenme_baslat(
         "v11_filtre_devam_zayif": bool(aday.get("v11_filtre_devam_zayif")),
         "v11_filtre_rel_yok": bool(aday.get("v11_filtre_rel_yok")),
         "v11_filtre_ek_risk": bool(aday.get("v11_filtre_ek_risk")),
+        "v11_yol_asiri_rel": bool(aday.get("v11_yol_asiri_rel")),
+        "v11_yol_temiz_momentum": bool(aday.get("v11_yol_temiz_momentum")),
+        "v11_momentum_pozitif_sayisi": int(aday.get("v11_momentum_pozitif_sayisi", 0) or 0),
     }
     AL_OGRENME_KAYITLARI.append(kayit)
     _al_ogrenme_kaydet()
@@ -2631,23 +2653,45 @@ def h_karar_hesapla(aday):
 
 
 def v11_canli_yumusak_filtre(aday):
-    """V11 hareketlerini koruyup yalnız birleşik zayıf profili Telegram'dan eler.
+    """BEAM/HOT tipini korur, parçalı ve sönük alt kaliteyi ayıklar.
 
-    Tek bir düşük değer veto değildir. Göreceli gücü olmayan adayda AI ve
-    Devam birlikte zayıfsa, ayrıca yüksek risk / şişme / momentum sönmesi /
-    hareket teyitsizliği bulunması gerekir. ADX bilinçli olarak veto değildir;
-    erken başlayan hareketleri öldürmemek için yalnız H motorunda kalır.
+    BEAM yolu iki 60dk göreceli farkın da çok güçlü olmasını; HOT yolu ise
+    3/5dk pozitifken dört kısa vadenin en az üçünün pozitif olmasını arar.
+    Bu iki yoldan biri varsa aday doğrudan korunur. İkisi de yoksa CVC/ilk ZRO
+    gibi parçalı-sönen momentum veya eski birleşik zayıflık vetoya dönüşür.
     """
     mikro = aday.get("mikro") or {}
     ai = float(aday.get("ai_skoru", 0) or 0)
     devam = float(aday.get("devam_gucu", 0) or 0)
-    rel_yok = int(aday.get("goreceli_guc_bonus", 0) or 0) == 0
+    coin_btc_60 = float(aday.get("coin_btc_60", 0) or 0)
+    coin_piyasa_60 = float(aday.get("coin_piyasa_60", 0) or 0)
     ai_zayif = ai < V11_FILTRE_AI_ESIK
     devam_zayif = devam < V11_FILTRE_DEVAM_ESIK
 
     d1 = float(mikro.get("d1", 0) or 0)
     d3 = float(mikro.get("d3", 0) or 0)
     d5 = float(mikro.get("d5", 0) or 0)
+    d10 = float(mikro.get("d10", 0) or 0)
+    pozitif_sayisi = sum(1 for x in (d1, d3, d5, d10) if x > 0)
+
+    asiri_rel_yolu = (
+        coin_btc_60 >= V11_ASIRI_REL_ESIK
+        and coin_piyasa_60 >= V11_ASIRI_REL_ESIK
+    )
+    temiz_momentum_yolu = (
+        d3 > 0
+        and d5 > 0
+        and pozitif_sayisi >= V11_TEMIZ_MOM_MIN_POZITIF
+    )
+    rel_yok = not asiri_rel_yolu
+
+    # CVC: 1/5dk negatif; ilk ZRO: 1/3dk sıfır-negatif. Bu iki yapı,
+    # aşırı göreceli güçle korunmuyorsa kısa hareketin parçalı olduğunu söyler.
+    parcalı_momentum = (
+        (d1 <= 0 and d5 <= 0)
+        or (d1 < 0 and d3 <= 0)
+        or pozitif_sayisi <= 1
+    )
     momentum_sonuyor = (
         (d1 < -0.15 and d3 <= 0.10)
         or (d3 <= 0.0 and d5 <= 0.0)
@@ -2671,10 +2715,27 @@ def v11_canli_yumusak_filtre(aday):
     if hareket_teyitsiz:
         ek_nedenler.append("hareket teyidi yok")
 
-    veto = rel_yok and ai_zayif and devam_zayif and bool(ek_nedenler)
+    eski_birlesik_veto = (
+        rel_yok and ai_zayif and devam_zayif and bool(ek_nedenler)
+    )
+    veto = (
+        not asiri_rel_yolu
+        and not temiz_momentum_yolu
+        and (parcalı_momentum or eski_birlesik_veto)
+    )
     nedenler = []
-    if rel_yok:
-        nedenler.append("60dk göreceli güç yok")
+    if asiri_rel_yolu:
+        nedenler.append(
+            f"BEAM yolu: 60dk BTC {coin_btc_60:+.2f} / piyasa {coin_piyasa_60:+.2f}"
+        )
+    if temiz_momentum_yolu:
+        nedenler.append(
+            f"HOT yolu: 3/5dk pozitif, {pozitif_sayisi}/4 vade pozitif"
+        )
+    if not asiri_rel_yolu and not temiz_momentum_yolu:
+        nedenler.append("BEAM/HOT yolu yok")
+    if parcalı_momentum:
+        nedenler.append(f"parçalı momentum ({pozitif_sayisi}/4 pozitif)")
     if ai_zayif:
         nedenler.append(f"AI {ai:.1f} < {V11_FILTRE_AI_ESIK:.2f}")
     if devam_zayif:
@@ -2688,7 +2749,48 @@ def v11_canli_yumusak_filtre(aday):
     aday["v11_filtre_devam_zayif"] = devam_zayif
     aday["v11_filtre_rel_yok"] = rel_yok
     aday["v11_filtre_ek_risk"] = bool(ek_nedenler)
+    aday["v11_yol_asiri_rel"] = asiri_rel_yolu
+    aday["v11_yol_temiz_momentum"] = temiz_momentum_yolu
+    aday["v11_momentum_pozitif_sayisi"] = pozitif_sayisi
     return not veto, nedenler
+
+
+def v11_tekrar_mesaji_uygun(aday):
+    """Aynı coinin birkaç dakika arayla yeniden AL diye konuşmasını önler."""
+    symbol = aday.get("symbol", "")
+    now = time.time()
+    aktif = [
+        x for x in SINYAL_SIRA_GECMISI.get(symbol, [])
+        if now - float(x.get("ts", 0) or 0) <= SINYAL_SIRA_PENCERE
+    ]
+    if not aktif:
+        return True, ""
+
+    son = max(aktif, key=lambda x: float(x.get("ts", 0) or 0))
+    gecen = now - float(son.get("ts", 0) or 0)
+    if gecen < V11_TEKRAR_SOGUMA:
+        return False, f"son AL üzerinden {gecen / 60:.0f}dk geçti"
+    if bool(son.get("hit5")) and gecen < V11_TEKRAR_HIT5_BEKLEME:
+        return False, "önceki AL +%5 yaptı; 3 saat yeni giriş yok"
+
+    onceki_fiyat = float(son.get("fiyat", 0) or 0)
+    simdiki_fiyat = float(aday.get("fiyat", 0) or 0)
+    yeni_hareket = (
+        ((simdiki_fiyat / onceki_fiyat) - 1.0) * 100.0
+        if onceki_fiyat > 0 and simdiki_fiyat > 0 else 0.0
+    )
+    mikro = aday.get("mikro") or {}
+    yeniden_temiz = (
+        float(mikro.get("d3", 0) or 0) > 0
+        and float(mikro.get("d5", 0) or 0) > 0
+    )
+    if gecen < V11_TEKRAR_HIT5_BEKLEME and (
+        yeni_hareket < V11_TEKRAR_YENI_HAREKET or not yeniden_temiz
+    ):
+        return False, (
+            f"yeni bağımsız hareket yok ({yeni_hareket:+.2f}%, 3/5dk teyit={yeniden_temiz})"
+        )
+    return True, ""
 
 
 # Railway deploy / yeniden baslatma kontrolu: Telegram baglantisini aninda dogrula.
@@ -3426,6 +3528,14 @@ while True:
                     filtrelenenler.append(a)
                     continue
 
+                tekrar_kabul, tekrar_nedeni = v11_tekrar_mesaji_uygun(a)
+                if not tekrar_kabul:
+                    # Tekrar engeli gerçek bir BEKLE kararı değildir. Coin yeni,
+                    # bağımsız hareket kurarsa sonraki taramalarda yeniden sınanır.
+                    son_ai_kararlar[symbol] = "🟡 TEKRAR BEKLE"
+                    print(f"[V11 TEKRAR KORUMASI] {symbol} | {tekrar_nedeni}")
+                    continue
+
                 gonderilecekler.append(a)
 
             # Elenen adaylar Telegram ve +%5 kâr bildirimi üretmez. Yalnız
@@ -4041,8 +4151,22 @@ while True:
                     else:
                         _kalite_isareti = ""
 
+                    # Yeni iki canlı geçiş yolu mesajın ilk bakışta ayırt
+                    # edilmesi için başlığın en üstünde görünür.
+                    _beam_yolu = bool(a.get("v11_yol_asiri_rel"))
+                    _hot_yolu = bool(a.get("v11_yol_temiz_momentum"))
+                    if _beam_yolu and _hot_yolu:
+                        _yol_basligi = "💎🍯 ÇİFT TEYİT\n"
+                    elif _beam_yolu:
+                        _yol_basligi = "💎 60DK AYRIŞMA\n"
+                    elif _hot_yolu:
+                        _yol_basligi = "🍯 TEMİZ MOMENTUM\n"
+                    else:
+                        _yol_basligi = ""
+
                     # Eski Assistant gibi düz ve hızlı okunur; V11'in önemli yeni bilgileri üstte kalır.
                     mesaj = (
+                        f"{_yol_basligi}"
                         f"{_sira_prefix} {gorunen_coin} | {a.get('radar_kategori', '')} + 🟢 AL{_onceki_5_etiket}\n"\
                         f"{_kalite_isareti}\n"
                         f"{_btc_sok_satir}"
