@@ -69,6 +69,7 @@ MIN_KAR_KORUMA = 2.5
 _RAILWAY_VOLUME = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
 _AL_DEFAULT_DIR = _RAILWAY_VOLUME if _RAILWAY_VOLUME else ("/data" if os.path.isdir("/data") else ".")
 AL_OGRENME_DOSYA = os.getenv("AL_OGRENME_DOSYA", os.path.join(_AL_DEFAULT_DIR, "al_ogrenme_rejim.json"))
+AL_TAKIP_DOSYA = os.getenv("AL_TAKIP_DOSYA", os.path.join(_AL_DEFAULT_DIR, "v11_al_takip.json"))
 AL_OGRENME_SURESI = 3 * 60 * 60
 REJIM_RAPOR_ARALIGI = 24 * 60 * 60
 SON_REJIM_RAPOR_ZAMANI = time.time()
@@ -94,6 +95,14 @@ GELISTIRME_ORTA_N = 50
 GELISTIRME_YUKSEK_N = 100
 
 STRATEJI_SURUMU = "V11_ERKEN_YAKALA_DEVAM_GUCU"
+
+# V11 CANLI YUMUŞAK SÜZGEÇ
+# Amaç V11'in hareket yakalama gücünü koruyup, yalnız birkaç zayıflığın aynı
+# anda bulunduğu en düşük kaliteli yaklaşık %20-25'lik mesaj grubunu ayıklamak.
+# Tek bir eşik veya düşük ADX tek başına veto değildir.
+V11_FILTRE_AI_ESIK = 83.69
+V11_FILTRE_DEVAM_ESIK = 71.20
+V11_FILTRE_YANLIS_TEPKI = -1.5
 
 # 3 günlük ortak karşılaştırma raporu
 
@@ -157,8 +166,14 @@ def yuzde5_basariraporu_gerekirse_gonder():
         and pencere_bas <= float(x.get("zaman", 0) or 0) < pencere_son
     ]
 
-    tamam = [x for x in tum if x.get("tamamlandi")]
-    acik = [x for x in tum if not x.get("tamamlandi")]
+    # Ana V11 başlığı yalnız gerçekten Telegram'a gönderilen sinyalleri ölçer.
+    # Canlı süzgecin elediği gölge kayıtlar bu başarıya karıştırılmaz.
+    canli_tum = [
+        x for x in tum
+        if str(x.get("kayit_tipi", "telegram")) == "telegram"
+    ]
+    tamam = [x for x in canli_tum if x.get("tamamlandi")]
+    acik = [x for x in canli_tum if not x.get("tamamlandi")]
     basarili = [x for x in tamam if float(x.get("max_getiri", 0) or 0) >= 5.0]
     yanlis = [
         x for x in tamam
@@ -180,6 +195,58 @@ def yuzde5_basariraporu_gerekirse_gonder():
         if tamam else 0.0
     )
 
+    def _hedef_orani(grup, hedef):
+        return (
+            sum(1 for x in grup if float(x.get("max_getiri", 0) or 0) >= hedef)
+            / len(grup) * 100.0
+        ) if grup else 0.0
+
+    # Yeni canlı süzgecin gönderdiği ve elediği bütün V11 AL adayları aynı
+    # giriş fiyatından üç saat izlenir. Böylece +%2/+%3 hareketler kaybolmaz.
+    filtre_tamam = [
+        x for x in tum
+        if x.get("tamamlandi") and bool(x.get("v11_filtre_adayi"))
+    ]
+    filtre_kabul = [x for x in filtre_tamam if bool(x.get("v11_filtre_kabul"))]
+    filtre_veto = [x for x in filtre_tamam if not bool(x.get("v11_filtre_kabul"))]
+    filtre_acik = [
+        x for x in tum
+        if not x.get("tamamlandi") and bool(x.get("v11_filtre_adayi"))
+    ]
+    eleme_orani = (
+        len(filtre_veto) / len(filtre_tamam) * 100.0
+        if filtre_tamam else 0.0
+    )
+    toplam_iki = sum(
+        1 for x in filtre_tamam if float(x.get("max_getiri", 0) or 0) >= 2.0
+    )
+    korunan_iki = sum(
+        1 for x in filtre_kabul if float(x.get("max_getiri", 0) or 0) >= 2.0
+    )
+    iki_koruma = (korunan_iki / toplam_iki * 100.0) if toplam_iki else 0.0
+    veto_yanlis = sum(
+        1 for x in filtre_veto
+        if float(x.get("max_getiri", 0) or 0) < 2.0
+        and float(x.get("min_getiri", 0) or 0) <= V11_FILTRE_YANLIS_TEPKI
+    )
+    veto_yanlis_oran = (
+        veto_yanlis / len(filtre_veto) * 100.0 if filtre_veto else 0.0
+    )
+
+    filtre_metni = (
+        "\n\n🧹 V11 CANLI YUMUŞAK SÜZGEÇ\n"
+        f"• Tamamlanan aday={len(filtre_tamam)} | gönderilen={len(filtre_kabul)} | "
+        f"elenen={len(filtre_veto)} | eleme %{eleme_orani:.1f} | bekleyen={len(filtre_acik)}\n"
+        f"• Gönderilen: +%2 %{_hedef_orani(filtre_kabul, 2):.1f} | "
+        f"+%3 %{_hedef_orani(filtre_kabul, 3):.1f} | +%5 %{_hedef_orani(filtre_kabul, 5):.1f}\n"
+        f"• Elenen: +%2 %{_hedef_orani(filtre_veto, 2):.1f} | "
+        f"+%3 %{_hedef_orani(filtre_veto, 3):.1f} | +%5 %{_hedef_orani(filtre_veto, 5):.1f}\n"
+        f"• +%2 hareket koruma %{iki_koruma:.1f} | "
+        f"elenenlerde yanlış tepki %{veto_yanlis_oran:.1f}\n"
+        "• Filtre: göreceli güç yok + AI/Devam birlikte zayıf + ek risk/sönme. "
+        "Düşük ADX tek başına elemez."
+    )
+
     mesaj = (
         f"📊 3 GÜNLÜK +%5 / YANLIŞ SİNYAL RAPORU — {YUZDE5_RAPOR_ETIKETI}\n\n"
         f"Tamamlanan sinyal: {len(tamam)}\n"
@@ -191,7 +258,8 @@ def yuzde5_basariraporu_gerekirse_gonder():
         f"🧠 Net sinyal kalitesi: %{net_kalite:.1f}\n"
         f"📈 Ortalama tepe getiri: %{ort_tepe:+.2f}\n"
         f"📉 Ortalama dip getiri: %{ort_dip:+.2f}\n"
-        f"⏳ Henüz tamamlanmayan: {len(acik)}\n\n"
+        f"⏳ Henüz tamamlanmayan: {len(acik)}"
+        f"{filtre_metni}\n\n"
         f"Not: Başarı = AL sonrası 3 saat içinde en az +%5 tepe. "
         f"Yanlış = +%5 görmeden en az -%2.5 ters hareket."
     )
@@ -726,6 +794,65 @@ def bes_fiyat_teyit_guncelle(fiyatlar):
             telegram_gonder(mesaj)
 
 
+def _al_takip_yukle():
+    """Deploy/restart sonrasında açık +%5 takiplerini Railway Volume'dan geri yükler."""
+    try:
+        if os.path.exists(AL_TAKIP_DOSYA):
+            with open(AL_TAKIP_DOSYA, "r", encoding="utf-8") as f:
+                veri = json.load(f)
+            if isinstance(veri, dict):
+                return {
+                    str(symbol): kayit
+                    for symbol, kayit in veri.items()
+                    if isinstance(kayit, dict)
+                    and kayit.get("aktif")
+                    and not kayit.get("kar_bildirildi")
+                    and float(kayit.get("giris", 0) or 0) > 0
+                }
+    except Exception as e:
+        print("AL takip dosyası okunamadı:", e)
+    return {}
+
+
+def _al_takip_kaydet():
+    """Açık +%5 takiplerini atomik yazar; yarım JSON ile takip kaybını önler."""
+    try:
+        klasor = os.path.dirname(os.path.abspath(AL_TAKIP_DOSYA))
+        if klasor:
+            os.makedirs(klasor, exist_ok=True)
+        gecici = AL_TAKIP_DOSYA + ".tmp"
+        with open(gecici, "w", encoding="utf-8") as f:
+            json.dump(AL_TAKIP, f, ensure_ascii=False, indent=2)
+        os.replace(gecici, AL_TAKIP_DOSYA)
+    except Exception as e:
+        print("AL takip dosyası yazılamadı:", e)
+
+
+def _al_takip_ogrenmeden_tamamla():
+    """Takip dosyası yoksa son 3 saatteki gerçek Telegram AL kayıtlarından onarır."""
+    simdi = time.time()
+    degisti = False
+    for k in AL_OGRENME_KAYITLARI:
+        if str(k.get("kayit_tipi", "telegram")) != "telegram" or k.get("tamamlandi"):
+            continue
+        if simdi - float(k.get("zaman", 0) or 0) >= AL_OGRENME_SURESI:
+            continue
+        symbol = str(k.get("symbol", "") or "")
+        giris = float(k.get("giris", 0) or 0)
+        if not symbol or giris <= 0 or symbol in AL_TAKIP:
+            continue
+        AL_TAKIP[symbol] = {
+            "aktif": True,
+            "giris": giris,
+            "kar_bildirildi": False,
+            "sinyal_event_id": k.get("sinyal_event_id"),
+            "baslangic_zamani": float(k.get("zaman", simdi) or simdi),
+        }
+        degisti = True
+    if degisti:
+        _al_takip_kaydet()
+
+
 def al_takip_baslat(aday):
     """Gerçek AL mesajı gönderilen coini yalnızca +%5 kâr bildirimi için takip eder."""
     symbol = aday.get("symbol")
@@ -742,7 +869,9 @@ def al_takip_baslat(aday):
         "giris": fiyat,
         "kar_bildirildi": False,
         "sinyal_event_id": aday.get("_sinyal_event_id"),
+        "baslangic_zamani": time.time(),
     }
+    _al_takip_kaydet()
 
 
 def al_takip_guncelle(ticker):
@@ -778,8 +907,6 @@ def al_takip_guncelle(ticker):
         getiri = _pct(fiyat, giris)
 
         if getiri >= KAR_BILDIR_ESIK:
-            p["kar_bildirildi"] = True
-            _sinyal_sira_hit5_isaretle(symbol, p.get("sinyal_event_id"))
             mesaj = (
                 f"💰 +%5 KÂR BÖLGESİ - {kalin_coin_yazisi(symbol[:-3] if symbol.endswith('TRY') else symbol)}\n"
                 f"İlk AL: {giris:.4f} | Güncel: {fiyat:.4f}\n"
@@ -787,7 +914,13 @@ def al_takip_guncelle(ticker):
                 f"Not: Çık emri değil; kârı değerlendirmek / çıkışa hazırlanmak için ara uyarı."
             )
             print(mesaj)
-            telegram_gonder(mesaj)
+            if telegram_gonder(mesaj):
+                p["kar_bildirildi"] = True
+                p["aktif"] = False
+                _sinyal_sira_hit5_isaretle(symbol, p.get("sinyal_event_id"))
+                _al_takip_kaydet()
+            else:
+                print(symbol, "+%5 mesajı gönderilemedi; sonraki 15 sn kontrolde tekrar denenecek.")
 
     # Aynı 15 sn ticker akışı AL öğrenmesini de günceller; ekstra API isteği oluşturmaz.
     al_ogrenme_guncelle(ticker)
@@ -830,15 +963,23 @@ def _al_ogrenme_kaydet():
         print("AL öğrenme dosyası yazılamadı:", e)
 
 
-def al_ogrenme_baslat(aday, btc_d, piyasa_fiyatlari, piyasa_medyan3, btc_giris):
+def al_ogrenme_baslat(
+    aday, btc_d, piyasa_fiyatlari, piyasa_medyan3, btc_giris,
+    kayit_tipi="telegram",
+):
     symbol = aday.get("symbol")
     giris = float(aday.get("fiyat", 0) or 0)
     if not symbol or giris <= 0:
         return
 
-    # Aynı aktif AL için ikinci öğrenme kaydı açma.
+    # Aynı aktif Telegram veya aynı filtre gölgesi için ikinci kayıt açma.
+    # Filtre gölgesi gerçek Telegram kaydını engellemez.
     for k in reversed(AL_OGRENME_KAYITLARI[-100:]):
-        if k.get("symbol") == symbol and not k.get("tamamlandi"):
+        if (
+            k.get("symbol") == symbol
+            and not k.get("tamamlandi")
+            and str(k.get("kayit_tipi", "telegram")) == str(kayit_tipi)
+        ):
             return
 
     simdi = time.time()
@@ -850,6 +991,7 @@ def al_ogrenme_baslat(aday, btc_d, piyasa_fiyatlari, piyasa_medyan3, btc_giris):
         "min_getiri": 0.0,
         "son_getiri": None,
         "tamamlandi": False,
+        "kayit_tipi": str(kayit_tipi),
         "btc_rejim": _rejim_etiketi(btc_d.get("3s", 0)),
         "btc_3s": round(float(btc_d.get("3s", 0) or 0), 3),
         "piyasa_rejim": _rejim_etiketi(piyasa_medyan3),
@@ -905,6 +1047,13 @@ def al_ogrenme_baslat(aday, btc_d, piyasa_fiyatlari, piyasa_medyan3, btc_giris):
         "rsi": round(float(((aday.get("teknik") or {}).get("rsi", 0) or 0)), 3),
         "adx": round(float(((aday.get("teknik") or {}).get("adx", 0) or 0)), 3),
         "neden_metin": " | ".join(str(x) for x in (aday.get("nedenler") or [])),
+        "v11_filtre_adayi": bool(aday.get("v11_filtre_adayi")),
+        "v11_filtre_kabul": bool(aday.get("v11_filtre_kabul", True)),
+        "v11_filtre_nedenleri": list(aday.get("v11_filtre_nedenleri", [])),
+        "v11_filtre_ai_zayif": bool(aday.get("v11_filtre_ai_zayif")),
+        "v11_filtre_devam_zayif": bool(aday.get("v11_filtre_devam_zayif")),
+        "v11_filtre_rel_yok": bool(aday.get("v11_filtre_rel_yok")),
+        "v11_filtre_ek_risk": bool(aday.get("v11_filtre_ek_risk")),
     }
     AL_OGRENME_KAYITLARI.append(kayit)
     _al_ogrenme_kaydet()
@@ -991,7 +1140,12 @@ def rejim_raporu_gerekirse_gonder():
         return
 
     SON_REJIM_RAPOR_ZAMANI = simdi
-    tamam = [x for x in AL_OGRENME_KAYITLARI if x.get("tamamlandi") and x.get("son_getiri") is not None]
+    tamam = [
+        x for x in AL_OGRENME_KAYITLARI
+        if x.get("tamamlandi")
+        and x.get("son_getiri") is not None
+        and str(x.get("kayit_tipi", "telegram")) == "telegram"
+    ]
     # Ana rapor artık KÜMÜLATİF: eldeki tüm tamamlanmış AL kayıtlarını kullanır.
     # Son 24 saat sayısı ayrıca bilgi olarak gösterilir.
     gunluk = [x for x in tamam if simdi - float(x.get("tamamlanma_zamani", 0) or 0) <= 24 * 60 * 60]
@@ -1719,7 +1873,13 @@ def gelistirme_oneri_raporu_gerekirse_gonder():
     simdi = time.time()
     if SON_GELISTIRME_RAPOR_ZAMANI and simdi - SON_GELISTIRME_RAPOR_ZAMANI < GELISTIRME_RAPOR_ARALIGI:
         return
-    son7_tumu = [x for x in AL_OGRENME_KAYITLARI if x.get("tamamlandi") and float(x.get("tamamlanma_zamani", 0) or 0) > 0 and simdi - float(x.get("tamamlanma_zamani", 0) or 0) <= GELISTIRME_PENCERE]
+    son7_tumu = [
+        x for x in AL_OGRENME_KAYITLARI
+        if x.get("tamamlandi")
+        and str(x.get("kayit_tipi", "telegram")) == "telegram"
+        and float(x.get("tamamlanma_zamani", 0) or 0) > 0
+        and simdi - float(x.get("tamamlanma_zamani", 0) or 0) <= GELISTIRME_PENCERE
+    ]
 
     # Eski veriyi silme; ama yeterli V7 örneği birikince haftalık öneriyi
     # yalnız mevcut strateji sürümünden üret. Böylece kod değişikliği raporu bozmaz.
@@ -1774,6 +1934,8 @@ def gelistirme_oneri_raporu_gerekirse_gonder():
 
 
 AL_OGRENME_KAYITLARI = _al_ogrenme_yukle()
+AL_TAKIP.update(_al_takip_yukle())
+_al_takip_ogrenmeden_tamamla()
 
 
 STABLE_COINLER = [
@@ -1814,9 +1976,11 @@ def kalin_coin_yazisi(metin):
 def telegram_gonder(mesaj, parse_mode=None):
     if not BOT_TOKEN:
         print("BOT_TOKEN bulunamadı. Railway Variables kontrol et.")
-        return
+        return False
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    basarili = False
+    tumu_basarili = True
 
     for chat_id in CHAT_IDS:
         try:
@@ -1829,8 +1993,15 @@ def telegram_gonder(mesaj, parse_mode=None):
                 timeout=10
             )
             print(chat_id, r.text)
+            r.raise_for_status()
+            cevap = r.json()
+            if not cevap.get("ok"):
+                raise RuntimeError(cevap.get("description", "Telegram gönderimi başarısız"))
+            basarili = True
         except Exception as e:
+            tumu_basarili = False
             print(chat_id, e)
+    return basarili and tumu_basarili
 
 
 def veri_getir(symbol, saat=24):
@@ -2457,6 +2628,67 @@ def h_karar_hesapla(aday):
         "risk": risk,
         "nedenler": nedenler[:4]
     }
+
+
+def v11_canli_yumusak_filtre(aday):
+    """V11 hareketlerini koruyup yalnız birleşik zayıf profili Telegram'dan eler.
+
+    Tek bir düşük değer veto değildir. Göreceli gücü olmayan adayda AI ve
+    Devam birlikte zayıfsa, ayrıca yüksek risk / şişme / momentum sönmesi /
+    hareket teyitsizliği bulunması gerekir. ADX bilinçli olarak veto değildir;
+    erken başlayan hareketleri öldürmemek için yalnız H motorunda kalır.
+    """
+    mikro = aday.get("mikro") or {}
+    ai = float(aday.get("ai_skoru", 0) or 0)
+    devam = float(aday.get("devam_gucu", 0) or 0)
+    rel_yok = int(aday.get("goreceli_guc_bonus", 0) or 0) == 0
+    ai_zayif = ai < V11_FILTRE_AI_ESIK
+    devam_zayif = devam < V11_FILTRE_DEVAM_ESIK
+
+    d1 = float(mikro.get("d1", 0) or 0)
+    d3 = float(mikro.get("d3", 0) or 0)
+    d5 = float(mikro.get("d5", 0) or 0)
+    momentum_sonuyor = (
+        (d1 < -0.15 and d3 <= 0.10)
+        or (d3 <= 0.0 and d5 <= 0.0)
+    )
+    sisti = bool(mikro.get("sisti", False))
+    yuksek_risk = str(aday.get("risk", "")).strip().lower() == "yüksek"
+    hareket_teyitsiz = (
+        int(aday.get("dinamik_teyit_sayisi", 0) or 0) == 0
+        and not bool(aday.get("basamakli_trend"))
+        and not bool(aday.get("momentum_hizlaniyor"))
+        and not bool(aday.get("btc_farki_aciliyor"))
+        and not bool(aday.get("lider_gucleniyor"))
+    )
+    ek_nedenler = []
+    if yuksek_risk:
+        ek_nedenler.append("yüksek risk")
+    if sisti:
+        ek_nedenler.append("kısa hareket şişmiş")
+    if momentum_sonuyor:
+        ek_nedenler.append("kısa momentum sönüyor")
+    if hareket_teyitsiz:
+        ek_nedenler.append("hareket teyidi yok")
+
+    veto = rel_yok and ai_zayif and devam_zayif and bool(ek_nedenler)
+    nedenler = []
+    if rel_yok:
+        nedenler.append("60dk göreceli güç yok")
+    if ai_zayif:
+        nedenler.append(f"AI {ai:.1f} < {V11_FILTRE_AI_ESIK:.2f}")
+    if devam_zayif:
+        nedenler.append(f"Devam {devam:.1f} < {V11_FILTRE_DEVAM_ESIK:.2f}")
+    nedenler.extend(ek_nedenler)
+
+    aday["v11_filtre_adayi"] = True
+    aday["v11_filtre_kabul"] = not veto
+    aday["v11_filtre_nedenleri"] = nedenler
+    aday["v11_filtre_ai_zayif"] = ai_zayif
+    aday["v11_filtre_devam_zayif"] = devam_zayif
+    aday["v11_filtre_rel_yok"] = rel_yok
+    aday["v11_filtre_ek_risk"] = bool(ek_nedenler)
+    return not veto, nedenler
 
 
 # Railway deploy / yeniden baslatma kontrolu: Telegram baglantisini aninda dogrula.
@@ -3162,6 +3394,7 @@ while True:
             print("Şu an uygun aday yok.")
         else:
             gonderilecekler = []
+            filtrelenenler = []
 
             for a in top10:
                 symbol = a["symbol"]
@@ -3178,7 +3411,36 @@ while True:
                 if onceki_karar == karar:
                     continue
 
+                # V11'in erken/hareketli yapısını koruyan canlı yumuşak süzgeç.
+                # Yalnız birleşik zayıf profil Telegram'dan çıkar; sonuç gölgede
+                # aynı giriş fiyatından üç saat boyunca ayrıca ölçülür.
+                filtre_kabul, filtre_nedenleri = v11_canli_yumusak_filtre(a)
+                if not filtre_kabul:
+                    # Koşullar sonraki taramada düzelirse aynı coin yeniden
+                    # değerlendirilebilsin; filtre veto durumu gerçek AL sayılmaz.
+                    son_ai_kararlar[symbol] = "🟡 FİLTRE BEKLE"
+                    print(
+                        f"[V11 YUMUŞAK FİLTRE] {symbol} | ELENDİ | "
+                        + "; ".join(filtre_nedenleri)
+                    )
+                    filtrelenenler.append(a)
+                    continue
+
                 gonderilecekler.append(a)
+
+            # Elenen adaylar Telegram ve +%5 kâr bildirimi üretmez. Yalnız
+            # +%2/+%3/+%5 ve yanlış tepki karşılaştırması için izlenir.
+            piyasa_medyan3 = statistics.median(piyasa_degisim3leri) if piyasa_degisim3leri else 0.0
+            btc_giris_fiyati = ticker_fiyat_haritasi.get("BTCTRY", 0)
+            for _a in filtrelenenler:
+                al_ogrenme_baslat(
+                    _a,
+                    btc_d,
+                    piyasa_fiyatlari,
+                    piyasa_medyan3,
+                    btc_giris_fiyati,
+                    kayit_tipi="v11_kalite_veto",
+                )
 
             if not gonderilecekler:
                 print("Yeni AL kararı yok. Telegram sessiz.")
@@ -3806,8 +4068,6 @@ while True:
                     gonderilenler.append(a)
 
                 # Yalnızca gerçekten gönderilen AL'ları +%5 kâr bildirimi ve 3 saatlik rejim öğrenmesi için takip et.
-                piyasa_medyan3 = statistics.median(piyasa_degisim3leri) if piyasa_degisim3leri else 0.0
-                btc_giris_fiyati = ticker_fiyat_haritasi.get("BTCTRY", 0)
                 for _a in gonderilenler:
                     al_takip_baslat(_a)
                     al_ogrenme_baslat(_a, btc_d, piyasa_fiyatlari, piyasa_medyan3, btc_giris_fiyati)
