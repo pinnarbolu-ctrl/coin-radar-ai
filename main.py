@@ -109,6 +109,20 @@ V11_TEKRAR_SOGUMA = 30 * 60
 V11_TEKRAR_HIT5_BEKLEME = 3 * 60 * 60
 V11_TEKRAR_YENI_HAREKET = 1.5
 
+# S49 GÜÇLÜ TEYİT — V11 İÇİNDE TEK BOT KATMANI
+# S49'un tamamı V11'e taşınmaz. Yalnız raporlarda ayırıcı çıkan iki yapı,
+# mevcut V11 AL adayını koruyan ve mesajın başında görünür kılan teyittir:
+#   1) 3dk + 5dk çift momentum
+#   2) ADX ile Genel/Devam gücünün birlikte yüksek olması
+# Yeni aday üretmez, BEKLE/SAT kararını AL'a çevirmez, yumuşak süzgeci
+# değiştirmez ve tek başına Telegram mesajı oluşturmaz. V11'in zaten gönderdiği
+# AL adayını görünür biçimde işaretler; böylece tek bot üzerinden ölçülebilir.
+S49_GUCLU_D3_ESIK = 0.31
+S49_GUCLU_D5_ESIK = 0.32
+S49_GUCLU_ADX_ESIK = 33.66
+S49_GUCLU_GENEL_ESIK = 83.69
+S49_GUCLU_DEVAM_ESIK = 71.20
+
 # 3 günlük ortak karşılaştırma raporu
 
 # ORTAK 3 GÜNLÜK RAPOR TAKVİMİ
@@ -126,7 +140,7 @@ def _planli_3gun_rapor_zamani(simdi, meta):
     son_planli = float(meta.get("son_planli_rapor_ts", 0) or 0)
     return son_planli < planli, planli
 
-YUZDE5_RAPOR_ETIKETI = "V11 Erken+Devam"
+YUZDE5_RAPOR_ETIKETI = "V11 Erken+Devam + S49 Güçlü Teyit"
 _YUZDE5_META_DOSYA = os.path.join(_AL_DEFAULT_DIR, "yuzde5_basariraporu_v11.json")
 
 def _yuzde5_meta_yukle():
@@ -206,6 +220,15 @@ def yuzde5_basariraporu_gerekirse_gonder():
             / len(grup) * 100.0
         ) if grup else 0.0
 
+    def _yanlis_orani(grup):
+        return (
+            sum(
+                1 for x in grup
+                if float(x.get("max_getiri", 0) or 0) < 5.0
+                and float(x.get("min_getiri", 0) or 0) <= -2.5
+            ) / len(grup) * 100.0
+        ) if grup else 0.0
+
     # Yeni canlı süzgecin gönderdiği ve elediği bütün V11 AL adayları aynı
     # giriş fiyatından üç saat izlenir. Böylece +%2/+%3 hareketler kaybolmaz.
     filtre_tamam = [
@@ -223,6 +246,21 @@ def yuzde5_basariraporu_gerekirse_gonder():
     ]
     temiz_mom_yolu = [
         x for x in filtre_tamam if bool(x.get("v11_yol_temiz_momentum"))
+    ]
+    # Yalnız yeni tek-bot sürümünde ölçülen kayıtlar karşılaştırılır; önceki
+    # V11 kayıtları yanlışlıkla "teyitsiz" grubuna karıştırılmaz.
+    s49_olcum_tamam = [
+        x for x in filtre_kabul if bool(x.get("s49_teyit_olcum"))
+    ]
+    s49_guclu_tamam = [
+        x for x in s49_olcum_tamam if bool(x.get("s49_guclu_teyit"))
+    ]
+    s49_diger_tamam = [
+        x for x in s49_olcum_tamam if not bool(x.get("s49_guclu_teyit"))
+    ]
+    s49_olcum_acik = [
+        x for x in filtre_acik
+        if bool(x.get("s49_teyit_olcum")) and bool(x.get("v11_filtre_kabul"))
     ]
     eleme_orani = (
         len(filtre_veto) / len(filtre_tamam) * 100.0
@@ -260,6 +298,20 @@ def yuzde5_basariraporu_gerekirse_gonder():
         f"n={len(temiz_mom_yolu)} | +%2 %{_hedef_orani(temiz_mom_yolu, 2):.1f} | "
         f"+%3 %{_hedef_orani(temiz_mom_yolu, 3):.1f} | "
         f"+%5 %{_hedef_orani(temiz_mom_yolu, 5):.1f}\n"
+        "\n💎 S49 GÜÇLÜ TEYİT — V11 İÇİNDE\n"
+        f"• Güçlü teyit: n={len(s49_guclu_tamam)} | "
+        f"+%2 %{_hedef_orani(s49_guclu_tamam, 2):.1f} | "
+        f"+%3 %{_hedef_orani(s49_guclu_tamam, 3):.1f} | "
+        f"+%5 %{_hedef_orani(s49_guclu_tamam, 5):.1f} | "
+        f"yanlış %{_yanlis_orani(s49_guclu_tamam):.1f}\n"
+        f"• Diğer V11 adayları: n={len(s49_diger_tamam)} | "
+        f"+%2 %{_hedef_orani(s49_diger_tamam, 2):.1f} | "
+        f"+%3 %{_hedef_orani(s49_diger_tamam, 3):.1f} | "
+        f"+%5 %{_hedef_orani(s49_diger_tamam, 5):.1f} | "
+        f"yanlış %{_yanlis_orani(s49_diger_tamam):.1f} | "
+        f"bekleyen={len(s49_olcum_acik)}\n"
+        "• Güçlü teyit yeni AL üretmez ve süzgeci değiştirmez; gönderilen V11 "
+        "mesajlarını öncelik etiketiyle ayırır.\n"
         f"• +%2 hareket koruma %{iki_koruma:.1f} | "
         f"elenenlerde yanlış tepki %{veto_yanlis_oran:.1f}\n"
         "• BEAM/HOT yolu doğrudan korunur. Diğerlerinde parçalı/sönen momentum "
@@ -1076,6 +1128,13 @@ def al_ogrenme_baslat(
         "v11_yol_asiri_rel": bool(aday.get("v11_yol_asiri_rel")),
         "v11_yol_temiz_momentum": bool(aday.get("v11_yol_temiz_momentum")),
         "v11_momentum_pozitif_sayisi": int(aday.get("v11_momentum_pozitif_sayisi", 0) or 0),
+        # Tek bot içinde taşınan S49 güçlü teyit katmanı.
+        "s49_teyit_olcum": bool(aday.get("s49_teyit_olcum")),
+        "s49_guclu_teyit": bool(aday.get("s49_guclu_teyit")),
+        "s49_teyit_cift_momentum": bool(aday.get("s49_teyit_cift_momentum")),
+        "s49_teyit_adx_genel_devam": bool(aday.get("s49_teyit_adx_genel_devam")),
+        "s49_teyit_temiz_risk": bool(aday.get("s49_teyit_temiz_risk")),
+        "s49_teyit_nedenleri": list(aday.get("s49_teyit_nedenleri", [])),
     }
     AL_OGRENME_KAYITLARI.append(kayit)
     _al_ogrenme_kaydet()
@@ -2652,6 +2711,57 @@ def h_karar_hesapla(aday):
     }
 
 
+def s49_guclu_teyit_etiketle(aday):
+    """S49'un doğrulanan güçlü teyidini mevcut V11 AL adayında ölçer.
+
+    Bu fonksiyon yeni AL üretmez ve V11 süzgecini değiştirmez. V11'in H
+    motorunun zaten AL dediği adayda çift momentumu veya ADX + Genel/Devam
+    bileşimini işaretler. Yüksek riskli aday güçlü teyit etiketi alamaz.
+    """
+    mikro = aday.get("mikro") or {}
+    teknik = aday.get("teknik") or {}
+
+    d3 = float(mikro.get("d3", 0) or 0)
+    d5 = float(mikro.get("d5", 0) or 0)
+    adx = float(teknik.get("adx", 0) or 0)
+    genel = float(aday.get("ai_skoru", 0) or 0)
+    devam = float(aday.get("devam_gucu", 0) or 0)
+    temiz_risk = str(aday.get("risk", "")).strip().lower() != "yüksek"
+
+    cift_momentum = (
+        d3 >= S49_GUCLU_D3_ESIK
+        and d5 >= S49_GUCLU_D5_ESIK
+    )
+    adx_genel_devam = (
+        adx >= S49_GUCLU_ADX_ESIK
+        and (
+            genel >= S49_GUCLU_GENEL_ESIK
+            or devam >= S49_GUCLU_DEVAM_ESIK
+        )
+    )
+    guclu_teyit = temiz_risk and (cift_momentum or adx_genel_devam)
+
+    nedenler = []
+    if cift_momentum:
+        nedenler.append(
+            f"çift momentum (3dk %{d3:+.2f}, 5dk %{d5:+.2f})"
+        )
+    if adx_genel_devam:
+        nedenler.append(
+            f"ADX {adx:.1f} + Genel {genel:.0f}/Devam {devam:.0f}"
+        )
+    if not temiz_risk:
+        nedenler.append("yüksek risk: güçlü teyit koruması kapalı")
+
+    aday["s49_teyit_olcum"] = True
+    aday["s49_guclu_teyit"] = bool(guclu_teyit)
+    aday["s49_teyit_cift_momentum"] = bool(cift_momentum)
+    aday["s49_teyit_adx_genel_devam"] = bool(adx_genel_devam)
+    aday["s49_teyit_temiz_risk"] = bool(temiz_risk)
+    aday["s49_teyit_nedenleri"] = nedenler
+    return bool(guclu_teyit), nedenler
+
+
 def v11_canli_yumusak_filtre(aday):
     """BEAM/HOT tipini korur, parçalı ve sönük alt kaliteyi ayıklar.
 
@@ -2661,6 +2771,7 @@ def v11_canli_yumusak_filtre(aday):
     gibi parçalı-sönen momentum veya eski birleşik zayıflık vetoya dönüşür.
     """
     mikro = aday.get("mikro") or {}
+    s49_guclu_teyit, s49_teyit_nedenleri = s49_guclu_teyit_etiketle(aday)
     ai = float(aday.get("ai_skoru", 0) or 0)
     devam = float(aday.get("devam_gucu", 0) or 0)
     coin_btc_60 = float(aday.get("coin_btc_60", 0) or 0)
@@ -2732,8 +2843,10 @@ def v11_canli_yumusak_filtre(aday):
         nedenler.append(
             f"HOT yolu: 3/5dk pozitif, {pozitif_sayisi}/4 vade pozitif"
         )
-    if not asiri_rel_yolu and not temiz_momentum_yolu:
-        nedenler.append("BEAM/HOT yolu yok")
+    if s49_guclu_teyit:
+        nedenler.append("S49 güçlü teyit: " + " + ".join(s49_teyit_nedenleri))
+    if not asiri_rel_yolu and not temiz_momentum_yolu and not s49_guclu_teyit:
+        nedenler.append("BEAM/HOT/S49 güçlü teyit yolu yok")
     if parcalı_momentum:
         nedenler.append(f"parçalı momentum ({pozitif_sayisi}/4 pozitif)")
     if ai_zayif:
@@ -2794,7 +2907,7 @@ def v11_tekrar_mesaji_uygun(aday):
 
 
 # Railway deploy / yeniden baslatma kontrolu: Telegram baglantisini aninda dogrula.
-telegram_gonder("✅ RADAR başladı ve aktif. Tarama başlıyor.")
+telegram_gonder("✅ V11 + S49 GÜÇLÜ TEYİT başladı ve aktif. Tek bot taramaya başlıyor.")
 
 while True:
     try:
@@ -4155,6 +4268,8 @@ while True:
                     # edilmesi için başlığın en üstünde görünür.
                     _beam_yolu = bool(a.get("v11_yol_asiri_rel"))
                     _hot_yolu = bool(a.get("v11_yol_temiz_momentum"))
+                    _s49_guclu_teyit = bool(a.get("s49_guclu_teyit"))
+                    _s49_basligi = "💎 S49 GÜÇLÜ TEYİT\n" if _s49_guclu_teyit else ""
                     if _beam_yolu and _hot_yolu:
                         _yol_basligi = "💎🍯 ÇİFT TEYİT\n"
                     elif _beam_yolu:
@@ -4166,7 +4281,7 @@ while True:
 
                     # Eski Assistant gibi düz ve hızlı okunur; V11'in önemli yeni bilgileri üstte kalır.
                     mesaj = (
-                        f"{_yol_basligi}"
+                        f"{_s49_basligi}{_yol_basligi}"
                         f"{_sira_prefix} {gorunen_coin} | {a.get('radar_kategori', '')} + 🟢 AL{_onceki_5_etiket}\n"\
                         f"{_kalite_isareti}\n"
                         f"{_btc_sok_satir}"
