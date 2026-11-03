@@ -123,6 +123,16 @@ S49_GUCLU_ADX_ESIK = 33.66
 S49_GUCLU_GENEL_ESIK = 83.69
 S49_GUCLU_DEVAM_ESIK = 71.20
 
+# V11 GİRİŞ ZAMANI KORUMASI
+# Güçlü teyit, hareket zaten büyük ölçüde yaşandıktan sonra gelirse AL değildir.
+# Aday Telegram'da uyarı olarak görünür ve gölgede ölçülür; canlı AL takibine
+# veya ilerideki otomatik gerçek-emir kapısına girmez.
+V11_GEC_ERKEN_MIN = 55
+V11_GEC_D5_MAX = 3.0
+V11_GEC_D10_MAX = 4.5
+V11_GEC_RSI_MAX = 72.0
+V11_UST_DUZEY_ERKEN_MIN = 60
+
 # 3 günlük ortak karşılaştırma raporu
 
 # ORTAK 3 GÜNLÜK RAPOR TAKVİMİ
@@ -235,7 +245,15 @@ def yuzde5_basariraporu_gerekirse_gonder():
         x for x in tum
         if x.get("tamamlandi") and bool(x.get("v11_filtre_adayi"))
     ]
-    filtre_kabul = [x for x in filtre_tamam if bool(x.get("v11_filtre_kabul"))]
+    gec_teyit_tamam = [
+        x for x in filtre_tamam
+        if str(x.get("kayit_tipi", "")) == "v11_gec_teyit"
+        or bool(x.get("v11_gec_teyit"))
+    ]
+    filtre_kabul = [
+        x for x in filtre_tamam
+        if bool(x.get("v11_filtre_kabul")) and x not in gec_teyit_tamam
+    ]
     filtre_veto = [x for x in filtre_tamam if not bool(x.get("v11_filtre_kabul"))]
     filtre_acik = [
         x for x in tum
@@ -290,6 +308,15 @@ def yuzde5_basariraporu_gerekirse_gonder():
         f"+%3 %{_hedef_orani(filtre_kabul, 3):.1f} | +%5 %{_hedef_orani(filtre_kabul, 5):.1f}\n"
         f"• Elenen: +%2 %{_hedef_orani(filtre_veto, 2):.1f} | "
         f"+%3 %{_hedef_orani(filtre_veto, 3):.1f} | +%5 %{_hedef_orani(filtre_veto, 5):.1f}\n"
+        "\n⏱️ V11 GİRİŞ ZAMANI KORUMASI\n"
+        f"• Geç teyit: n={len(gec_teyit_tamam)} | "
+        f"+%2 %{_hedef_orani(gec_teyit_tamam, 2):.1f} | "
+        f"+%3 %{_hedef_orani(gec_teyit_tamam, 3):.1f} | "
+        f"+%5 %{_hedef_orani(gec_teyit_tamam, 5):.1f} | "
+        f"yanlış %{_yanlis_orani(gec_teyit_tamam):.1f}\n"
+        f"• Koruma: Erken <{V11_GEC_ERKEN_MIN} veya 5dk >%{V11_GEC_D5_MAX:.1f} "
+        f"veya 10dk >%{V11_GEC_D10_MAX:.1f} veya RSI >{V11_GEC_RSI_MAX:.0f}; "
+        "Telegram'da ALMA uyarısıdır, canlı AL değildir.\n"
         f"• BEAM yolu (60dk iki fark ≥+{V11_ASIRI_REL_ESIK:.0f}): n={len(asiri_rel_yolu)} | "
         f"+%2 %{_hedef_orani(asiri_rel_yolu, 2):.1f} | "
         f"+%3 %{_hedef_orani(asiri_rel_yolu, 3):.1f} | "
@@ -314,8 +341,8 @@ def yuzde5_basariraporu_gerekirse_gonder():
         "mesajlarını öncelik etiketiyle ayırır.\n"
         f"• +%2 hareket koruma %{iki_koruma:.1f} | "
         f"elenenlerde yanlış tepki %{veto_yanlis_oran:.1f}\n"
-        "• BEAM/HOT yolu doğrudan korunur. Diğerlerinde parçalı/sönen momentum "
-        "ve birleşik zayıflık ayıklanır; düşük ADX tek başına elemez."
+        "• BEAM/HOT yolu kalite süzgecinde korunur; fakat giriş zamanı korumasını "
+        "geçmek zorundadır. Parçalı/sönen momentum ve birleşik zayıflık ayrıca ayıklanır."
     )
 
     mesaj = (
@@ -1135,6 +1162,8 @@ def al_ogrenme_baslat(
         "s49_teyit_adx_genel_devam": bool(aday.get("s49_teyit_adx_genel_devam")),
         "s49_teyit_temiz_risk": bool(aday.get("s49_teyit_temiz_risk")),
         "s49_teyit_nedenleri": list(aday.get("s49_teyit_nedenleri", [])),
+        "v11_gec_teyit": bool(aday.get("v11_gec_teyit")),
+        "v11_gec_teyit_nedenleri": list(aday.get("v11_gec_teyit_nedenleri", [])),
     }
     AL_OGRENME_KAYITLARI.append(kayit)
     _al_ogrenme_kaydet()
@@ -3671,6 +3700,7 @@ while True:
                 # Her coin Telegram'a AYRI mesaj olarak gider.
                 # Böylece aynı taramada bulunan coinler tek uzun mesajda birleşmez.
                 gonderilenler = []
+                gec_teyitler = []
 
                 for a in gonderilecekler:
                     teknik = a.get("teknik")
@@ -4269,6 +4299,40 @@ while True:
                     _beam_yolu = bool(a.get("v11_yol_asiri_rel"))
                     _hot_yolu = bool(a.get("v11_yol_temiz_momentum"))
                     _s49_guclu_teyit = bool(a.get("s49_guclu_teyit"))
+
+                    # Güçlü görünmek ile erken giriş olmak aynı şey değildir.
+                    # BLUR benzeri, 5/10 dakikalık hareketini yapmış veya RSI'ı
+                    # aşırı ısınmış adaylar AL yerine geç teyit uyarısı olur.
+                    _gec_nedenleri = []
+                    if _erken_yakalama_puani < V11_GEC_ERKEN_MIN:
+                        _gec_nedenleri.append(
+                            f"Erken {_erken_yakalama_puani}<{V11_GEC_ERKEN_MIN}"
+                        )
+                    if float(_d5 or 0) > V11_GEC_D5_MAX:
+                        _gec_nedenleri.append(f"5dk %{float(_d5):.2f}")
+                    if float(_d10 or 0) > V11_GEC_D10_MAX:
+                        _gec_nedenleri.append(f"10dk %{float(_d10):.2f}")
+                    if _rsi is not None and float(_rsi) > V11_GEC_RSI_MAX:
+                        _gec_nedenleri.append(f"RSI {float(_rsi):.1f}")
+
+                    _gec_teyit = bool(_gec_nedenleri)
+                    a["v11_gec_teyit"] = _gec_teyit
+                    a["v11_gec_teyit_nedenleri"] = list(_gec_nedenleri)
+
+                    _ust_duzey = bool(
+                        _s49_guclu_teyit
+                        and _beam_yolu
+                        and _hot_yolu
+                        and not _gec_teyit
+                        and _erken_yakalama_puani >= V11_UST_DUZEY_ERKEN_MIN
+                        and _ema_yon == "Yukarı"
+                    )
+                    if _gec_teyit:
+                        _seviye_basligi = "⚠️ GEÇ TEYİT — ALMA / OTOMATİK EMİR YOK\n"
+                    elif _ust_duzey:
+                        _seviye_basligi = "🏆 1. SEVİYE — ERKEN ÜST DÜZEY\n"
+                    else:
+                        _seviye_basligi = ""
                     _s49_basligi = "💎 S49 GÜÇLÜ TEYİT\n" if _s49_guclu_teyit else ""
                     if _beam_yolu and _hot_yolu:
                         _yol_basligi = "💎🍯 ÇİFT TEYİT\n"
@@ -4279,11 +4343,18 @@ while True:
                     else:
                         _yol_basligi = ""
 
+                    _karar_gorunumu = "⚠️ İZLE / ALMA" if _gec_teyit else "🟢 AL"
+                    _gec_neden_satiri = (
+                        "⏱️ Geç kalma nedeni: " + " • ".join(_gec_nedenleri) + "\n"
+                        if _gec_teyit else ""
+                    )
+
                     # Eski Assistant gibi düz ve hızlı okunur; V11'in önemli yeni bilgileri üstte kalır.
                     mesaj = (
-                        f"{_s49_basligi}{_yol_basligi}"
-                        f"{_sira_prefix} {gorunen_coin} | {a.get('radar_kategori', '')} + 🟢 AL{_onceki_5_etiket}\n"\
+                        f"{_seviye_basligi}{_s49_basligi}{_yol_basligi}"
+                        f"{_sira_prefix} {gorunen_coin} | {a.get('radar_kategori', '')} + {_karar_gorunumu}{_onceki_5_etiket}\n"\
                         f"{_kalite_isareti}\n"
+                        f"{_gec_neden_satiri}"
                         f"{_btc_sok_satir}"
                         f"🎯 Devam Gücü: {_al_odak_puani}/100 | {_al_odak_etiket}\n"
                         f"⚡ Erken Yakalama: {_erken_yakalama_puani}/100 | {_erken_yakalama_etiket}\n"
@@ -4300,6 +4371,11 @@ while True:
                     # Telegram'da da aynı sade metin kullanılır.
                     print(mesaj)
                     telegram_gonder(mesaj)
+                    if _gec_teyit:
+                        # Görünür uyarı gönderilir; fakat AL sırasına, +%5 kâr
+                        # bildirimi takibine ve gerçek-emir adaylığına girmez.
+                        gec_teyitler.append(a)
+                        continue
                     # Mesaj gönderildikten sonra sıra olayını kalıcı kayda al.
                     a["_sinyal_event_id"] = _sinyal_sira_ekle(a.get("symbol", ""), a.get("fiyat", 0))
                     # Gönderilmiş her AL için fiyat devamını izler; AL kararını değiştirmez.
@@ -4310,6 +4386,18 @@ while True:
                 for _a in gonderilenler:
                     al_takip_baslat(_a)
                     al_ogrenme_baslat(_a, btc_d, piyasa_fiyatlari, piyasa_medyan3, btc_giris_fiyati)
+
+                # Geç teyitler yalnız gölgede üç saat ölçülür; ana canlı AL
+                # başarı oranına, +%5 ara mesajına ve gerçek-emir kapısına girmez.
+                for _a in gec_teyitler:
+                    al_ogrenme_baslat(
+                        _a,
+                        btc_d,
+                        piyasa_fiyatlari,
+                        piyasa_medyan3,
+                        btc_giris_fiyati,
+                        kayit_tipi="v11_gec_teyit",
+                    )
 
         # Ana tarama 60 sn; kâr bildirimi için açık AL'lar 15 sn'de bir kontrol edilir.
         beklenen = 0
