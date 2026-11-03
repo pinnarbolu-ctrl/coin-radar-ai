@@ -127,11 +127,13 @@ S49_GUCLU_DEVAM_ESIK = 71.20
 # Güçlü teyit, hareket zaten büyük ölçüde yaşandıktan sonra gelirse AL değildir.
 # Aday Telegram'da uyarı olarak görünür ve gölgede ölçülür; canlı AL takibine
 # veya ilerideki otomatik gerçek-emir kapısına girmez.
-V11_GEC_ERKEN_MIN = 55
 V11_GEC_D5_MAX = 3.0
 V11_GEC_D10_MAX = 4.5
 V11_GEC_RSI_MAX = 72.0
 V11_UST_DUZEY_ERKEN_MIN = 60
+V11_SEVIYE2_AI_MIN = 90.0
+V11_SEVIYE2_DEVAM_MIN = 80.0
+V11_SEVIYE2_RADAR_MIN = 60.0
 
 # 3 günlük ortak karşılaştırma raporu
 
@@ -250,9 +252,22 @@ def yuzde5_basariraporu_gerekirse_gonder():
         if str(x.get("kayit_tipi", "")) == "v11_gec_teyit"
         or bool(x.get("v11_gec_teyit"))
     ]
+    erken_izle_tamam = [
+        x for x in filtre_tamam
+        if str(x.get("kayit_tipi", "")) == "v11_erken_izle"
+        or int(x.get("v11_seviye", 0) or 0) == 3
+    ]
+    seviye1_tamam = [
+        x for x in filtre_tamam if int(x.get("v11_seviye", 0) or 0) == 1
+    ]
+    seviye2_tamam = [
+        x for x in filtre_tamam if int(x.get("v11_seviye", 0) or 0) == 2
+    ]
     filtre_kabul = [
         x for x in filtre_tamam
-        if bool(x.get("v11_filtre_kabul")) and x not in gec_teyit_tamam
+        if bool(x.get("v11_filtre_kabul"))
+        and x not in gec_teyit_tamam
+        and x not in erken_izle_tamam
     ]
     filtre_veto = [x for x in filtre_tamam if not bool(x.get("v11_filtre_kabul"))]
     filtre_acik = [
@@ -314,9 +329,27 @@ def yuzde5_basariraporu_gerekirse_gonder():
         f"+%3 %{_hedef_orani(gec_teyit_tamam, 3):.1f} | "
         f"+%5 %{_hedef_orani(gec_teyit_tamam, 5):.1f} | "
         f"yanlış %{_yanlis_orani(gec_teyit_tamam):.1f}\n"
-        f"• Koruma: Erken <{V11_GEC_ERKEN_MIN} veya 5dk >%{V11_GEC_D5_MAX:.1f} "
-        f"veya 10dk >%{V11_GEC_D10_MAX:.1f} veya RSI >{V11_GEC_RSI_MAX:.0f}; "
+        f"• Koruma: 5dk >%{V11_GEC_D5_MAX:.1f} veya "
+        f"10dk >%{V11_GEC_D10_MAX:.1f} veya RSI >{V11_GEC_RSI_MAX:.0f}; "
         "Telegram'da ALMA uyarısıdır, canlı AL değildir.\n"
+        "\n🧭 V11 ERKEN KALİTE SEVİYELERİ\n"
+        f"• 1. Seviye Erken Üst Düzey: n={len(seviye1_tamam)} | "
+        f"+%2 %{_hedef_orani(seviye1_tamam, 2):.1f} | "
+        f"+%3 %{_hedef_orani(seviye1_tamam, 3):.1f} | "
+        f"+%5 %{_hedef_orani(seviye1_tamam, 5):.1f} | "
+        f"yanlış %{_yanlis_orani(seviye1_tamam):.1f}\n"
+        f"• 2. Seviye Erken Güçlü: n={len(seviye2_tamam)} | "
+        f"+%2 %{_hedef_orani(seviye2_tamam, 2):.1f} | "
+        f"+%3 %{_hedef_orani(seviye2_tamam, 3):.1f} | "
+        f"+%5 %{_hedef_orani(seviye2_tamam, 5):.1f} | "
+        f"yanlış %{_yanlis_orani(seviye2_tamam):.1f}\n"
+        f"• 3. Seviye Erken İzle: n={len(erken_izle_tamam)} | "
+        f"+%2 %{_hedef_orani(erken_izle_tamam, 2):.1f} | "
+        f"+%3 %{_hedef_orani(erken_izle_tamam, 3):.1f} | "
+        f"+%5 %{_hedef_orani(erken_izle_tamam, 5):.1f} | "
+        f"yanlış %{_yanlis_orani(erken_izle_tamam):.1f}\n"
+        "• Erken Yakalama puanı tek başına geç kalma vetosu değildir; "
+        "zamanlama gerçek 5/10dk hareketi ve RSI ile, kalite ayrı puanlarla ölçülür.\n"
         f"• BEAM yolu (60dk iki fark ≥+{V11_ASIRI_REL_ESIK:.0f}): n={len(asiri_rel_yolu)} | "
         f"+%2 %{_hedef_orani(asiri_rel_yolu, 2):.1f} | "
         f"+%3 %{_hedef_orani(asiri_rel_yolu, 3):.1f} | "
@@ -1164,6 +1197,7 @@ def al_ogrenme_baslat(
         "s49_teyit_nedenleri": list(aday.get("s49_teyit_nedenleri", [])),
         "v11_gec_teyit": bool(aday.get("v11_gec_teyit")),
         "v11_gec_teyit_nedenleri": list(aday.get("v11_gec_teyit_nedenleri", [])),
+        "v11_seviye": int(aday.get("v11_seviye", 0) or 0),
     }
     AL_OGRENME_KAYITLARI.append(kayit)
     _al_ogrenme_kaydet()
@@ -3701,6 +3735,7 @@ while True:
                 # Böylece aynı taramada bulunan coinler tek uzun mesajda birleşmez.
                 gonderilenler = []
                 gec_teyitler = []
+                erken_izleler = []
 
                 for a in gonderilecekler:
                     teknik = a.get("teknik")
@@ -4301,13 +4336,10 @@ while True:
                     _s49_guclu_teyit = bool(a.get("s49_guclu_teyit"))
 
                     # Güçlü görünmek ile erken giriş olmak aynı şey değildir.
-                    # BLUR benzeri, 5/10 dakikalık hareketini yapmış veya RSI'ı
-                    # aşırı ısınmış adaylar AL yerine geç teyit uyarısı olur.
+                    # Zamanlama yalnız gerçek kısa hareket ve RSI ile ölçülür.
+                    # Erken Yakalama puanı kalite sınıfına katkıdır; tek başına
+                    # geç kalma vetosu değildir (AMP gibi fırsatları korur).
                     _gec_nedenleri = []
-                    if _erken_yakalama_puani < V11_GEC_ERKEN_MIN:
-                        _gec_nedenleri.append(
-                            f"Erken {_erken_yakalama_puani}<{V11_GEC_ERKEN_MIN}"
-                        )
                     if float(_d5 or 0) > V11_GEC_D5_MAX:
                         _gec_nedenleri.append(f"5dk %{float(_d5):.2f}")
                     if float(_d10 or 0) > V11_GEC_D10_MAX:
@@ -4319,7 +4351,7 @@ while True:
                     a["v11_gec_teyit"] = _gec_teyit
                     a["v11_gec_teyit_nedenleri"] = list(_gec_nedenleri)
 
-                    _ust_duzey = bool(
+                    _seviye1 = bool(
                         _s49_guclu_teyit
                         and _beam_yolu
                         and _hot_yolu
@@ -4327,12 +4359,29 @@ while True:
                         and _erken_yakalama_puani >= V11_UST_DUZEY_ERKEN_MIN
                         and _ema_yon == "Yukarı"
                     )
+                    _seviye2 = bool(
+                        not _gec_teyit
+                        and not _seviye1
+                        and _s49_guclu_teyit
+                        and _ema_yon == "Yukarı"
+                        and not _risk_yuksek
+                        and float(a.get("ai_skoru", 0) or 0) >= V11_SEVIYE2_AI_MIN
+                        and float(a.get("devam_gucu", 0) or 0) >= V11_SEVIYE2_DEVAM_MIN
+                        and float(a.get("radar_skoru", 0) or 0) >= V11_SEVIYE2_RADAR_MIN
+                    )
                     if _gec_teyit:
+                        _seviye = 0
                         _seviye_basligi = "⚠️ GEÇ TEYİT — ALMA / OTOMATİK EMİR YOK\n"
-                    elif _ust_duzey:
+                    elif _seviye1:
+                        _seviye = 1
                         _seviye_basligi = "🏆 1. SEVİYE — ERKEN ÜST DÜZEY\n"
+                    elif _seviye2:
+                        _seviye = 2
+                        _seviye_basligi = "💎 2. SEVİYE — ERKEN GÜÇLÜ\n"
                     else:
-                        _seviye_basligi = ""
+                        _seviye = 3
+                        _seviye_basligi = "🌱 3. SEVİYE — ERKEN İZLE\n"
+                    a["v11_seviye"] = int(_seviye)
                     _s49_basligi = "💎 S49 GÜÇLÜ TEYİT\n" if _s49_guclu_teyit else ""
                     if _beam_yolu and _hot_yolu:
                         _yol_basligi = "💎🍯 ÇİFT TEYİT\n"
@@ -4343,7 +4392,12 @@ while True:
                     else:
                         _yol_basligi = ""
 
-                    _karar_gorunumu = "⚠️ İZLE / ALMA" if _gec_teyit else "🟢 AL"
+                    if _gec_teyit:
+                        _karar_gorunumu = "⚠️ İZLE / ALMA"
+                    elif _seviye == 3:
+                        _karar_gorunumu = "🟡 İZLE"
+                    else:
+                        _karar_gorunumu = "🟢 AL"
                     _gec_neden_satiri = (
                         "⏱️ Geç kalma nedeni: " + " • ".join(_gec_nedenleri) + "\n"
                         if _gec_teyit else ""
@@ -4376,6 +4430,11 @@ while True:
                         # bildirimi takibine ve gerçek-emir adaylığına girmez.
                         gec_teyitler.append(a)
                         continue
+                    if _seviye == 3:
+                        # Erken fakat kalite puanları henüz yeterli değil.
+                        # Görünür izleme mesajıdır; canlı AL ve gerçek emir değildir.
+                        erken_izleler.append(a)
+                        continue
                     # Mesaj gönderildikten sonra sıra olayını kalıcı kayda al.
                     a["_sinyal_event_id"] = _sinyal_sira_ekle(a.get("symbol", ""), a.get("fiyat", 0))
                     # Gönderilmiş her AL için fiyat devamını izler; AL kararını değiştirmez.
@@ -4397,6 +4456,18 @@ while True:
                         piyasa_medyan3,
                         btc_giris_fiyati,
                         kayit_tipi="v11_gec_teyit",
+                    )
+
+                # PUMP benzeri erken fakat düşük kaliteli adaylar kaybolmaz;
+                # Telegram'da 3. Seviye olarak görünür ve gölgede ayrıca ölçülür.
+                for _a in erken_izleler:
+                    al_ogrenme_baslat(
+                        _a,
+                        btc_d,
+                        piyasa_fiyatlari,
+                        piyasa_medyan3,
+                        btc_giris_fiyati,
+                        kayit_tipi="v11_erken_izle",
                     )
 
         # Ana tarama 60 sn; kâr bildirimi için açık AL'lar 15 sn'de bir kontrol edilir.
