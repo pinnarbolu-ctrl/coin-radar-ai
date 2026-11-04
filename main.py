@@ -4374,23 +4374,18 @@ while True:
                         _seviye_basligi = "⚠️ GEÇ TEYİT — ALMA / OTOMATİK EMİR YOK\n"
                     elif _seviye1:
                         _seviye = 1
-                        _seviye_basligi = "🏆 1. SEVİYE — ERKEN ÜST DÜZEY\n"
+                        _seviye_basligi = "🏆 ÜST DÜZEY AL\n"
                     elif _seviye2:
                         _seviye = 2
-                        _seviye_basligi = "💎 2. SEVİYE — ERKEN GÜÇLÜ\n"
+                        _seviye_basligi = "💎 GÜÇLÜ AL\n"
                     else:
                         _seviye = 3
-                        _seviye_basligi = "🌱 3. SEVİYE — ERKEN İZLE\n"
+                        _seviye_basligi = "🌱 İZLE\n"
                     a["v11_seviye"] = int(_seviye)
-                    _s49_basligi = "💎 S49 GÜÇLÜ TEYİT\n" if _s49_guclu_teyit else ""
-                    if _beam_yolu and _hot_yolu:
-                        _yol_basligi = "💎🍯 ÇİFT TEYİT\n"
-                    elif _beam_yolu:
-                        _yol_basligi = "💎 60DK AYRIŞMA\n"
-                    elif _hot_yolu:
-                        _yol_basligi = "🍯 TEMİZ MOMENTUM\n"
-                    else:
-                        _yol_basligi = ""
+                    # S49/BEAM/HOT teyitleri seviye hesabında çalışmaya devam
+                    # eder; fakat Telegram başlığını çoğaltıp karıştırmaz.
+                    _s49_basligi = ""
+                    _yol_basligi = ""
 
                     if _gec_teyit:
                         _karar_gorunumu = "⚠️ İZLE / ALMA"
@@ -4422,14 +4417,19 @@ while True:
                         f"{neden_alarm}Neden: {_neden_temiz}\n"
                     )
 
-                    # Telegram'da da aynı sade metin kullanılır.
-                    print(mesaj)
-                    telegram_gonder(mesaj)
                     if _gec_teyit:
-                        # Görünür uyarı gönderilir; fakat AL sırasına, +%5 kâr
-                        # bildirimi takibine ve gerçek-emir adaylığına girmez.
+                        # Telegram'ı doldurmaz; AL sırasına, +%5 kâr bildirimine
+                        # ve gerçek-emir adaylığına girmez. Gölgede ölçülür.
+                        print(
+                            f"[V11 GEÇ TEYİT/GÖLGE] {symbol} | "
+                            + " • ".join(_gec_nedenleri)
+                        )
                         gec_teyitler.append(a)
                         continue
+                    # Telegram'da yalnız erken Üst Düzey/Güçlü/İzle sınıfları
+                    # sade tek başlıkla gösterilir.
+                    print(mesaj)
+                    telegram_gonder(mesaj)
                     if _seviye == 3:
                         # Erken fakat kalite puanları henüz yeterli değil.
                         # Görünür izleme mesajıdır; canlı AL ve gerçek emir değildir.
