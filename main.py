@@ -315,6 +315,28 @@ def yuzde5_basariraporu_gerekirse_gonder():
         veto_yanlis / len(filtre_veto) * 100.0 if filtre_veto else 0.0
     )
 
+    # Telegram'daki üç sade sınıfın özellikle kısa +%3 hareket başarısını
+    # karşılaştır. Küçük örneklemde yalnız geçici lider gösterilir; canlı
+    # eşikler veya mesaj kapıları otomatik değiştirilmez.
+    seviye_gruplari = [
+        ("🏆 Üst Düzey AL", seviye1_tamam),
+        ("💎 Güçlü AL", seviye2_tamam),
+        ("🌱 İzle", erken_izle_tamam),
+    ]
+    dolu_seviyeler = [(ad, grup) for ad, grup in seviye_gruplari if grup]
+    if dolu_seviyeler:
+        uc_lider_ad, uc_lider_grup = max(
+            dolu_seviyeler,
+            key=lambda item: (_hedef_orani(item[1], 3), len(item[1])),
+        )
+        uc_lider_metni = (
+            f"• Geçici +%3 lideri: {uc_lider_ad} | "
+            f"+%3 %{_hedef_orani(uc_lider_grup, 3):.1f} | "
+            f"n={len(uc_lider_grup)}\n"
+        )
+    else:
+        uc_lider_metni = "• Geçici +%3 lideri: henüz tamamlanan ölçüm yok.\n"
+
     filtre_metni = (
         "\n\n🧹 V11 CANLI YUMUŞAK SÜZGEÇ\n"
         f"• Tamamlanan aday={len(filtre_tamam)} | gönderilen={len(filtre_kabul)} | "
@@ -331,23 +353,26 @@ def yuzde5_basariraporu_gerekirse_gonder():
         f"yanlış %{_yanlis_orani(gec_teyit_tamam):.1f}\n"
         f"• Koruma: 5dk >%{V11_GEC_D5_MAX:.1f} veya "
         f"10dk >%{V11_GEC_D10_MAX:.1f} veya RSI >{V11_GEC_RSI_MAX:.0f}; "
-        "Telegram'da ALMA uyarısıdır, canlı AL değildir.\n"
-        "\n🧭 V11 ERKEN KALİTE SEVİYELERİ\n"
-        f"• 1. Seviye Erken Üst Düzey: n={len(seviye1_tamam)} | "
+        "Telegram'a gönderilmez; gölgede ölçülür.\n"
+        "\n🧭 V11 MESAJ SINIFLARI — +%3 KARŞILAŞTIRMASI\n"
+        f"• 🏆 Üst Düzey AL: n={len(seviye1_tamam)} | "
         f"+%2 %{_hedef_orani(seviye1_tamam, 2):.1f} | "
         f"+%3 %{_hedef_orani(seviye1_tamam, 3):.1f} | "
         f"+%5 %{_hedef_orani(seviye1_tamam, 5):.1f} | "
         f"yanlış %{_yanlis_orani(seviye1_tamam):.1f}\n"
-        f"• 2. Seviye Erken Güçlü: n={len(seviye2_tamam)} | "
+        f"• 💎 Güçlü AL: n={len(seviye2_tamam)} | "
         f"+%2 %{_hedef_orani(seviye2_tamam, 2):.1f} | "
         f"+%3 %{_hedef_orani(seviye2_tamam, 3):.1f} | "
         f"+%5 %{_hedef_orani(seviye2_tamam, 5):.1f} | "
         f"yanlış %{_yanlis_orani(seviye2_tamam):.1f}\n"
-        f"• 3. Seviye Erken İzle: n={len(erken_izle_tamam)} | "
+        f"• 🌱 İzle: n={len(erken_izle_tamam)} | "
         f"+%2 %{_hedef_orani(erken_izle_tamam, 2):.1f} | "
         f"+%3 %{_hedef_orani(erken_izle_tamam, 3):.1f} | "
         f"+%5 %{_hedef_orani(erken_izle_tamam, 5):.1f} | "
         f"yanlış %{_yanlis_orani(erken_izle_tamam):.1f}\n"
+        f"{uc_lider_metni}"
+        "• Kalıcı +%3 lideri için üç grupta da en az 8 tamamlanmış sinyal beklenir; "
+        "ölçüm canlı kararı otomatik değiştirmez.\n"
         "• Erken Yakalama puanı tek başına geç kalma vetosu değildir; "
         "zamanlama gerçek 5/10dk hareketi ve RSI ile, kalite ayrı puanlarla ölçülür.\n"
         f"• BEAM yolu (60dk iki fark ≥+{V11_ASIRI_REL_ESIK:.0f}): n={len(asiri_rel_yolu)} | "
