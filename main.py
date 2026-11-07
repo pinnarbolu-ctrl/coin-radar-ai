@@ -142,6 +142,20 @@ TOP10_GOLGE_MAX_KAYIT = 3000
 TOP10_KOD_ONERI_MIN_ORNEK = 8
 _TOP10_AKTIF_SYMBOLLER = set()
 
+# Telegram Üst/Güçlü AL ve İZLE mesajından sonra giriş zamanını ölçen gölge
+# deney. Sınıflar ayrı raporlanır; canlı mesajı, AL kararını veya gerçek emri
+# değiştirmez.
+GIRIS_DENEYI_DOSYA = os.getenv(
+    "GIRIS_DENEYI_DOSYA",
+    os.path.join(_AL_DEFAULT_DIR, "v11_al_giris_zamani_deneyi.json"),
+)
+GIRIS_DENEYI_SURESI = 3 * 60 * 60
+GIRIS_DENEYI_CEKILIS_PENCERESI = 30 * 60
+GIRIS_DENEYI_CEKILISLER = (1.0, 1.5, 2.0, 2.5, 3.0)
+GIRIS_DENEYI_DONUS_TEYIDI = 0.5
+GIRIS_DENEYI_KARAR_MIN = 30
+GIRIS_DENEYI_MAX_KAYIT = 3000
+
 
 def _top10_golge_yukle():
     try:
@@ -387,6 +401,374 @@ def top10_kacan_hareket_raporu(pencere_bas, pencere_son):
     satirlar.append(
         "• Öneriler kodu otomatik değiştirmez; yalnız ilk görülme anından sonraki +%3/+%5 sonuçlarıyla doğrulanır."
     )
+    return "\n".join(satirlar)
+
+
+def _giris_deneyi_yukle():
+    try:
+        if os.path.exists(GIRIS_DENEYI_DOSYA):
+            with open(GIRIS_DENEYI_DOSYA, "r", encoding="utf-8") as f:
+                veri = json.load(f)
+            return veri if isinstance(veri, list) else []
+    except Exception as e:
+        print("AL giriş zamanı deneyi okunamadı:", e)
+    return []
+
+
+def _giris_deneyi_kaydet():
+    try:
+        klasor = os.path.dirname(os.path.abspath(GIRIS_DENEYI_DOSYA))
+        if klasor:
+            os.makedirs(klasor, exist_ok=True)
+        gecici = GIRIS_DENEYI_DOSYA + ".tmp"
+        with open(gecici, "w", encoding="utf-8") as f:
+            json.dump(
+                GIRIS_ZAMANI_DENEY_KAYITLARI[-GIRIS_DENEYI_MAX_KAYIT:],
+                f,
+                ensure_ascii=False,
+            )
+        os.replace(gecici, GIRIS_DENEYI_DOSYA)
+    except Exception as e:
+        print("AL giriş zamanı deneyi yazılamadı:", e)
+
+
+def _giris_varyant_anahtari(tur, esik):
+    return f"{tur}_{float(esik):.1f}"
+
+
+def giris_zamani_deneyi_baslat(aday):
+    """Telegram'a giden Üst/Güçlü AL ve İZLE için ayrı deney açar."""
+    seviye = int(aday.get("v11_seviye", 0) or 0)
+    symbol = str(aday.get("symbol", ""))
+    fiyat = float(aday.get("fiyat", 0) or 0)
+    if seviye not in (1, 2, 3) or not symbol or fiyat <= 0:
+        return
+
+    event_id = str(aday.get("_sinyal_event_id", "") or "")
+    if event_id and any(str(k.get("event_id", "")) == event_id for k in GIRIS_ZAMANI_DENEY_KAYITLARI):
+        return
+    # Restart/event-id bulunamaması halinde aynı coinde yakın çift kayıt açma.
+    simdi = time.time()
+    if any(
+        k.get("symbol") == symbol
+        and not k.get("tamamlandi")
+        and simdi - float(k.get("zaman", 0) or 0) < GIRIS_DENEYI_CEKILIS_PENCERESI
+        for k in GIRIS_ZAMANI_DENEY_KAYITLARI[-100:]
+    ):
+        return
+
+    varyantlar = {}
+    for esik in GIRIS_DENEYI_CEKILISLER:
+        for tur in ("limit", "donus"):
+            varyantlar[_giris_varyant_anahtari(tur, esik)] = {
+                "tur": tur,
+                "esik": float(esik),
+                "kuruldu": False,
+                "giris": None,
+                "giris_zamani": None,
+                "dip_fiyat": None,
+                "max_getiri": None,
+                "min_getiri": None,
+                "son_getiri": None,
+            }
+
+    GIRIS_ZAMANI_DENEY_KAYITLARI.append({
+        "symbol": symbol,
+        "event_id": event_id,
+        "zaman": simdi,
+        "sinyal_fiyati": fiyat,
+        "v11_seviye": seviye,
+        "sinif": (
+            "Üst Düzey AL" if seviye == 1
+            else ("Güçlü AL" if seviye == 2 else "İZLE")
+        ),
+        "ilk30_dip": fiyat,
+        "ilk30_tepe": fiyat,
+        "ilk30_max_cekilis": 0.0,
+        "hemen_max_getiri": 0.0,
+        "hemen_min_getiri": 0.0,
+        "hemen_son_getiri": 0.0,
+        "varyantlar": varyantlar,
+        "tamamlandi": False,
+        "strateji_surumu": STRATEJI_SURUMU,
+    })
+    _giris_deneyi_kaydet()
+
+
+def giris_zamani_deneyi_aktif_mi():
+    return any(not k.get("tamamlandi") for k in GIRIS_ZAMANI_DENEY_KAYITLARI)
+
+
+def giris_zamani_deneyi_guncelle(ticker):
+    """15 sn ticker akışında hemen/limit/dönüş girişlerini aynı üç saatte izler."""
+    if not GIRIS_ZAMANI_DENEY_KAYITLARI:
+        return
+    fiyatlar = {}
+    for coin in ticker:
+        try:
+            symbol = str(coin.get("pair", ""))
+            fiyat = float(coin.get("last", 0) or 0)
+            if symbol and fiyat > 0:
+                fiyatlar[symbol] = fiyat
+        except Exception:
+            continue
+
+    simdi = time.time()
+    degisti = False
+    for kayit in GIRIS_ZAMANI_DENEY_KAYITLARI:
+        if kayit.get("tamamlandi"):
+            continue
+        fiyat = fiyatlar.get(kayit.get("symbol"))
+        sinyal = float(kayit.get("sinyal_fiyati", 0) or 0)
+        if not fiyat or sinyal <= 0:
+            continue
+        gecen = simdi - float(kayit.get("zaman", simdi) or simdi)
+
+        hemen = _pct(fiyat, sinyal)
+        kayit["hemen_max_getiri"] = round(max(float(kayit.get("hemen_max_getiri", 0) or 0), hemen), 3)
+        kayit["hemen_min_getiri"] = round(min(float(kayit.get("hemen_min_getiri", 0) or 0), hemen), 3)
+        kayit["hemen_son_getiri"] = round(hemen, 3)
+
+        varyantlar = kayit.get("varyantlar") or {}
+        if gecen <= GIRIS_DENEYI_CEKILIS_PENCERESI:
+            kayit["ilk30_dip"] = min(float(kayit.get("ilk30_dip", sinyal) or sinyal), fiyat)
+            kayit["ilk30_tepe"] = max(float(kayit.get("ilk30_tepe", sinyal) or sinyal), fiyat)
+            kayit["ilk30_max_cekilis"] = round(
+                min(float(kayit.get("ilk30_max_cekilis", 0) or 0), hemen), 3
+            )
+
+            for esik in GIRIS_DENEYI_CEKILISLER:
+                limit_v = varyantlar.get(_giris_varyant_anahtari("limit", esik), {})
+                donus_v = varyantlar.get(_giris_varyant_anahtari("donus", esik), {})
+                esik_fiyat = sinyal * (1.0 - float(esik) / 100.0)
+                if fiyat <= esik_fiyat:
+                    if not limit_v.get("giris"):
+                        # Sıçramalı düşüşte görülen daha düşük son fiyatı kullanmak
+                        # sonucu yapay iyileştirebilir. Emrin varsayılan dolumunu
+                        # konservatif biçimde önceden belirlenen limit seviyesinden yaz.
+                        limit_v["giris"] = esik_fiyat
+                        limit_v["giris_zamani"] = simdi
+                        limit_v["max_getiri"] = 0.0
+                        limit_v["min_getiri"] = 0.0
+                    donus_v["kuruldu"] = True
+                    eski_dip = donus_v.get("dip_fiyat")
+                    donus_v["dip_fiyat"] = fiyat if not eski_dip else min(float(eski_dip), fiyat)
+
+                if donus_v.get("kuruldu") and not donus_v.get("giris"):
+                    dip = float(donus_v.get("dip_fiyat", 0) or 0)
+                    if dip > 0 and _pct(fiyat, dip) >= GIRIS_DENEYI_DONUS_TEYIDI:
+                        donus_v["giris"] = fiyat
+                        donus_v["giris_zamani"] = simdi
+                        donus_v["max_getiri"] = 0.0
+                        donus_v["min_getiri"] = 0.0
+
+        # Kurulmuş bütün gerçekçi girişlerin kalan üç saatlik sonucunu ölç.
+        for v in varyantlar.values():
+            giris = float(v.get("giris", 0) or 0)
+            if giris <= 0:
+                continue
+            getiri = _pct(fiyat, giris)
+            v["max_getiri"] = round(max(float(v.get("max_getiri", 0) or 0), getiri), 3)
+            v["min_getiri"] = round(min(float(v.get("min_getiri", 0) or 0), getiri), 3)
+            v["son_getiri"] = round(getiri, 3)
+
+        if gecen >= GIRIS_DENEYI_SURESI:
+            kayit["tamamlandi"] = True
+            kayit["tamamlanma_zamani"] = simdi
+        degisti = True
+
+    if degisti:
+        _giris_deneyi_kaydet()
+
+
+def _giris_deneyi_oran(kayitlar, alan, hedef):
+    return (
+        sum(1 for k in kayitlar if float(k.get(alan, 0) or 0) >= hedef) / len(kayitlar) * 100.0
+        if kayitlar else 0.0
+    )
+
+
+def giris_zamani_deneyi_raporu(pencere_bas, pencere_son):
+    pencere = [
+        k for k in GIRIS_ZAMANI_DENEY_KAYITLARI
+        if pencere_bas <= float(k.get("zaman", 0) or 0) < pencere_son
+    ]
+    tamam_tumu = [k for k in pencere if k.get("tamamlandi")]
+    tamam_al = [k for k in tamam_tumu if int(k.get("v11_seviye", 0) or 0) in (1, 2)]
+    tamam_izle = [k for k in tamam_tumu if int(k.get("v11_seviye", 0) or 0) == 3]
+    pencere_al = [k for k in pencere if int(k.get("v11_seviye", 0) or 0) in (1, 2)]
+    pencere_izle = [k for k in pencere if int(k.get("v11_seviye", 0) or 0) == 3]
+    # Aşağıdaki ayrıntılı eşik tablosu gerçek AL grubuna aittir. İZLE grubu
+    # raporun sonunda ayrıca hesaplanır; iki sınıfın başarı oranı karışmaz.
+    tamam = tamam_al
+    if not pencere:
+        return (
+            "⏱️ AL/İZLE GİRİŞ ZAMANI DENEYİ — YALNIZ GÖLGE\n"
+            "• Yeni sürümden sonraki Üst Düzey/Güçlü AL ve İZLE mesajlarında ölçüm başlayacak."
+        )
+
+    hemen3 = _giris_deneyi_oran(tamam, "hemen_max_getiri", 3.0)
+    hemen5 = _giris_deneyi_oran(tamam, "hemen_max_getiri", 5.0)
+    hemen_dip = (
+        sum(float(k.get("hemen_min_getiri", 0) or 0) for k in tamam) / len(tamam)
+        if tamam else 0.0
+    )
+    hemen_kazanan = [k for k in tamam if float(k.get("hemen_max_getiri", 0) or 0) >= 3.0]
+    satirlar = [
+        "⏱️ AL/İZLE GİRİŞ ZAMANI DENEYİ — YALNIZ GÖLGE",
+        f"• Gerçek AL={len(pencere_al)} | İZLE={len(pencere_izle)} | toplam tamamlanan={len(tamam_tumu)} | bekleyen={len(pencere)-len(tamam_tumu)}",
+        "",
+        "💎 ÜST DÜZEY/GÜÇLÜ AL",
+        f"• Hemen giriş: +%3 %{hemen3:.1f} | +%5 %{hemen5:.1f} | ort. dip %{hemen_dip:+.2f}",
+        f"• Pencere: AL mesajından sonraki 30dk | dönüş teyidi: dipten +%{GIRIS_DENEYI_DONUS_TEYIDI:.1f}",
+        "",
+        "📉 ÇEKİLİŞ SEVİYELERİ",
+    ]
+
+    aday_sonuclari = []
+    for esik in GIRIS_DENEYI_CEKILISLER:
+        parcalar = []
+        for tur, tur_ad in (("limit", "limit"), ("donus", "dönüş")):
+            anahtar = _giris_varyant_anahtari(tur, esik)
+            giren = []
+            korunan = 0
+            avantajlar = []
+            for k in tamam:
+                v = (k.get("varyantlar") or {}).get(anahtar) or {}
+                if not v.get("giris"):
+                    continue
+                vv = dict(v)
+                vv["_kayit"] = k
+                giren.append(vv)
+                sinyal = float(k.get("sinyal_fiyati", 0) or 0)
+                giris = float(v.get("giris", 0) or 0)
+                if sinyal > 0 and giris > 0:
+                    avantajlar.append(_pct(sinyal, giris))
+                if k in hemen_kazanan and float(v.get("max_getiri", 0) or 0) >= 3.0:
+                    korunan += 1
+            p3 = (
+                sum(1 for v in giren if float(v.get("max_getiri", 0) or 0) >= 3.0) / len(giren) * 100.0
+                if giren else 0.0
+            )
+            p5 = (
+                sum(1 for v in giren if float(v.get("max_getiri", 0) or 0) >= 5.0) / len(giren) * 100.0
+                if giren else 0.0
+            )
+            dip = (
+                sum(float(v.get("min_getiri", 0) or 0) for v in giren) / len(giren)
+                if giren else 0.0
+            )
+            avantaj = sum(avantajlar) / len(avantajlar) if avantajlar else 0.0
+            kazanan_koruma = korunan / len(hemen_kazanan) * 100.0 if hemen_kazanan else 0.0
+            kabul = len(giren) / len(tamam) * 100.0 if tamam else 0.0
+            parcalar.append(
+                f"{tur_ad} n={len(giren)} (+%3 %{p3:.1f}, +%5 %{p5:.1f}, avantaj %{avantaj:+.2f})"
+            )
+            if tur == "donus" and len(giren) >= 3:
+                aday_sonuclari.append({
+                    "esik": esik,
+                    "n": len(giren),
+                    "p3": p3,
+                    "p5": p5,
+                    "dip": dip,
+                    "avantaj": avantaj,
+                    "koruma": kazanan_koruma,
+                    "kabul": kabul,
+                })
+        satirlar.append(f"• -%{esik:.1f}: " + " | ".join(parcalar))
+
+    dogrudan_giden = 0
+    for k in tamam:
+        v = (k.get("varyantlar") or {}).get(_giris_varyant_anahtari("limit", 1.0)) or {}
+        if not v.get("giris") and float(k.get("hemen_max_getiri", 0) or 0) >= 3.0:
+            dogrudan_giden += 1
+    satirlar.extend([
+        "",
+        f"🚀 -%1 çekilmeden doğrudan +%3 yapan: {dogrudan_giden}/{len(hemen_kazanan)}",
+        "🧠 GEÇİCİ KARAR",
+    ])
+
+    if len(tamam) < GIRIS_DENEYI_KARAR_MIN:
+        satirlar.append(
+            f"• Canlı giriş değişmez: tamamlanan n={len(tamam)}, karar için en az {GIRIS_DENEYI_KARAR_MIN} gerçek AL bekleniyor."
+        )
+    elif not aday_sonuclari:
+        satirlar.append("• Çekiliş-dönüş yöntemi yeterli giriş üretmedi; hemen giriş korunmalı.")
+    else:
+        en_iyi = max(
+            aday_sonuclari,
+            key=lambda x: (x["p3"] - hemen3, x["koruma"], x["n"]),
+        )
+        if en_iyi["p3"] >= hemen3 + 8.0 and en_iyi["koruma"] >= 75.0:
+            karar = f"-%{en_iyi['esik']:.1f} çekiliş + dönüş teyidi, hemen girişten daha güçlü aday."
+        elif en_iyi["p3"] > hemen3 and en_iyi["koruma"] >= 50.0:
+            karar = f"Kademeli giriş adayı: küçük kısmı AL'de, kalan kısmı -%{en_iyi['esik']:.1f} dönüşte."
+        else:
+            karar = "Beklemek yeterli kazananı korumadı; hemen giriş şimdilik daha uygun."
+        satirlar.append(
+            f"• {karar} Dönüş +%3 %{en_iyi['p3']:.1f} | kazanan koruma %{en_iyi['koruma']:.1f} | n={en_iyi['n']}."
+        )
+    # İZLE ayrı tutulur: amaç, bu erken uyarılarda hemen giriş yerine hangi
+    # çekiliş-dönüş bandının sonradan daha iyi fırsat verdiğini keşfetmektir.
+    izle3 = _giris_deneyi_oran(tamam_izle, "hemen_max_getiri", 3.0)
+    izle5 = _giris_deneyi_oran(tamam_izle, "hemen_max_getiri", 5.0)
+    izle_dip = (
+        sum(float(k.get("hemen_min_getiri", 0) or 0) for k in tamam_izle) / len(tamam_izle)
+        if tamam_izle else 0.0
+    )
+    izle_kazanan = [k for k in tamam_izle if float(k.get("hemen_max_getiri", 0) or 0) >= 3.0]
+    izle_adaylari = []
+    for esik in GIRIS_DENEYI_CEKILISLER:
+        anahtar = _giris_varyant_anahtari("donus", esik)
+        giren = []
+        avantajlar = []
+        for k in tamam_izle:
+            v = (k.get("varyantlar") or {}).get(anahtar) or {}
+            if not v.get("giris"):
+                continue
+            giren.append(v)
+            sinyal = float(k.get("sinyal_fiyati", 0) or 0)
+            giris = float(v.get("giris", 0) or 0)
+            if sinyal > 0 and giris > 0:
+                avantajlar.append(_pct(sinyal, giris))
+        p3 = (
+            sum(1 for v in giren if float(v.get("max_getiri", 0) or 0) >= 3.0) / len(giren) * 100.0
+            if giren else 0.0
+        )
+        p5 = (
+            sum(1 for v in giren if float(v.get("max_getiri", 0) or 0) >= 5.0) / len(giren) * 100.0
+            if giren else 0.0
+        )
+        avantaj = sum(avantajlar) / len(avantajlar) if avantajlar else 0.0
+        if len(giren) >= 3:
+            izle_adaylari.append({"esik": esik, "n": len(giren), "p3": p3, "p5": p5, "avantaj": avantaj})
+
+    izle_dogrudan = 0
+    for k in tamam_izle:
+        v = (k.get("varyantlar") or {}).get(_giris_varyant_anahtari("limit", 1.0)) or {}
+        if not v.get("giris") and float(k.get("hemen_max_getiri", 0) or 0) >= 3.0:
+            izle_dogrudan += 1
+
+    satirlar.extend([
+        "",
+        "🌱 İZLE — AYRI ÖLÇÜM",
+        f"• Tamamlanan={len(tamam_izle)} | mesaj fiyatından +%3 %{izle3:.1f} | +%5 %{izle5:.1f} | ort. dip %{izle_dip:+.2f}",
+        f"• -%1 çekilmeden doğrudan +%3 yapan: {izle_dogrudan}/{len(izle_kazanan)}",
+    ])
+    if izle_adaylari:
+        izle_en_iyi = max(izle_adaylari, key=lambda x: (x["p3"], x["p5"], x["n"]))
+        satirlar.append(
+            f"• Geçici en iyi dönüş: -%{izle_en_iyi['esik']:.1f} + dipten %{GIRIS_DENEYI_DONUS_TEYIDI:.1f} | "
+            f"n={izle_en_iyi['n']} | +%3 %{izle_en_iyi['p3']:.1f} | +%5 %{izle_en_iyi['p5']:.1f} | "
+            f"fiyat avantajı %{izle_en_iyi['avantaj']:+.2f}"
+        )
+    else:
+        satirlar.append("• Dönüş bandı için henüz en az 3 gerçekleşmiş İZLE girişi yok.")
+    if len(tamam_izle) < GIRIS_DENEYI_KARAR_MIN:
+        satirlar.append(
+            f"• İZLE için karar yok: en az {GIRIS_DENEYI_KARAR_MIN} tamamlanmış kayıt bekleniyor."
+        )
+    satirlar.append("• AL ve İZLE sonuçları birbirine karıştırılmaz; deney mesaj veya gerçek emir üretmez.")
     return "\n".join(satirlar)
 
 def _planli_3gun_rapor_zamani(simdi, meta):
@@ -644,6 +1026,10 @@ def yuzde5_basariraporu_gerekirse_gonder():
     top10_raporu = top10_kacan_hareket_raporu(pencere_bas, pencere_son)
     print(top10_raporu)
     telegram_gonder(top10_raporu)
+
+    giris_raporu = giris_zamani_deneyi_raporu(pencere_bas, pencere_son)
+    print(giris_raporu)
+    telegram_gonder(giris_raporu)
 
     _YUZDE5_META["son_rapor"] = planli_ts
     _YUZDE5_META["son_planli_rapor_ts"] = planli_ts
@@ -2320,6 +2706,7 @@ def gelistirme_oneri_raporu_gerekirse_gonder():
 
 AL_OGRENME_KAYITLARI = _al_ogrenme_yukle()
 TOP10_GOLGE_KAYITLARI = _top10_golge_yukle()
+GIRIS_ZAMANI_DENEY_KAYITLARI = _giris_deneyi_yukle()
 AL_TAKIP.update(_al_takip_yukle())
 _al_takip_ogrenmeden_tamamla()
 
@@ -3187,6 +3574,7 @@ while True:
         # Mevcut ticker cevabını öğrenme katmanında da kullan; ekstra API isteği yok.
         al_ogrenme_guncelle(ticker)
         top10_golge_ticker_guncelle(ticker)
+        giris_zamani_deneyi_guncelle(ticker)
         rejim_raporu_gerekirse_gonder()
         gelistirme_oneri_raporu_gerekirse_gonder()
         yuzde5_basariraporu_gerekirse_gonder()
@@ -4671,6 +5059,7 @@ while True:
                         # Erken fakat kalite puanları henüz yeterli değil.
                         # Görünür izleme mesajıdır; canlı AL ve gerçek emir değildir.
                         erken_izleler.append(a)
+                        giris_zamani_deneyi_baslat(a)
                         top10_golge_asama_guncelle(
                             symbol, "telegram_izle", telegram_izle=True, v11_seviye=3
                         )
@@ -4688,6 +5077,7 @@ while True:
                 for _a in gonderilenler:
                     al_takip_baslat(_a)
                     al_ogrenme_baslat(_a, btc_d, piyasa_fiyatlari, piyasa_medyan3, btc_giris_fiyati)
+                    giris_zamani_deneyi_baslat(_a)
 
                 # Geç teyitler yalnız gölgede üç saat ölçülür; ana canlı AL
                 # başarı oranına, +%5 ara mesajına ve gerçek-emir kapısına girmez.
@@ -4723,13 +5113,15 @@ while True:
             time.sleep(sure)
             beklenen += sure
 
-            if AL_TAKIP:
+            if AL_TAKIP or giris_zamani_deneyi_aktif_mi():
                 try:
                     r = requests.get("https://api.btcturk.com/api/v2/ticker", timeout=10)
                     r.raise_for_status()
-                    al_takip_guncelle(r.json().get("data", []))
+                    _ara_ticker = r.json().get("data", [])
+                    al_takip_guncelle(_ara_ticker)
+                    giris_zamani_deneyi_guncelle(_ara_ticker)
                 except Exception as e:
-                    print("Kâr bildirim takip hatası:", e)
+                    print("Kâr/giriş zamanı takip hatası:", e)
 
     except Exception as e:
         print("Bot genel hata:", e)
