@@ -129,6 +129,266 @@ V11_SEVIYE2_RADAR_MIN = 60.0
 ILK_3GUN_RAPOR_TS = 1791262800.0
 YUZDE5_RAPOR_ARALIGI = 3 * 24 * 60 * 60
 
+# BIST/BTCTurk ekranındaki gibi, günlük değişime göre ilk 10'a giren TRY
+# coinlerini gölgede izler. Bu katman AL üretmez; yalnız kaçan hareketin ilk
+# görüldüğü andaki profilini, hangi V11 kapısında kaldığını ve sonraki 3 saatte
+# ne yaptığını 3 günlük rapora taşır.
+TOP10_GOLGE_SURESI = 3 * 60 * 60
+TOP10_GOLGE_DOSYA = os.getenv(
+    "TOP10_GOLGE_DOSYA",
+    os.path.join(_AL_DEFAULT_DIR, "v11_top10_kacan_hareket.json"),
+)
+TOP10_GOLGE_MAX_KAYIT = 3000
+TOP10_KOD_ONERI_MIN_ORNEK = 8
+_TOP10_AKTIF_SYMBOLLER = set()
+
+
+def _top10_golge_yukle():
+    try:
+        if os.path.exists(TOP10_GOLGE_DOSYA):
+            with open(TOP10_GOLGE_DOSYA, "r", encoding="utf-8") as f:
+                veri = json.load(f)
+            return veri if isinstance(veri, list) else []
+    except Exception as e:
+        print("Top10 gölge dosyası okunamadı:", e)
+    return []
+
+
+def _top10_golge_kaydet():
+    try:
+        klasor = os.path.dirname(os.path.abspath(TOP10_GOLGE_DOSYA))
+        if klasor:
+            os.makedirs(klasor, exist_ok=True)
+        gecici = TOP10_GOLGE_DOSYA + ".tmp"
+        with open(gecici, "w", encoding="utf-8") as f:
+            json.dump(TOP10_GOLGE_KAYITLARI[-TOP10_GOLGE_MAX_KAYIT:], f, ensure_ascii=False)
+        os.replace(gecici, TOP10_GOLGE_DOSYA)
+    except Exception as e:
+        print("Top10 gölge dosyası yazılamadı:", e)
+
+
+def _top10_gun_anahtari(ts=None):
+    # Railway UTC çalışsa da rapor günü Türkiye saatine göre ayrılsın.
+    return time.strftime("%Y-%m-%d", time.gmtime(float(ts or time.time()) + 3 * 3600))
+
+
+def _ticker_gunluk_yuzde(coin):
+    try:
+        if coin.get("dailyPercent") is not None:
+            return float(coin.get("dailyPercent") or 0)
+        son = float(coin.get("last", 0) or 0)
+        acilis = float(coin.get("open", 0) or 0)
+        return _pct(son, acilis) if son > 0 and acilis > 0 else 0.0
+    except Exception:
+        return 0.0
+
+
+def top10_golge_ticker_guncelle(ticker):
+    """Mevcut ticker isteğiyle rolling ilk 10'u açar ve 3 saatlik sonucu günceller."""
+    global _TOP10_AKTIF_SYMBOLLER
+    simdi = time.time()
+    gun = _top10_gun_anahtari(simdi)
+    uygun = []
+    fiyatlar = {}
+    for coin in ticker:
+        try:
+            symbol = str(coin.get("pair", ""))
+            fiyat = float(coin.get("last", 0) or 0)
+            if (
+                not symbol.endswith("TRY")
+                or symbol == "BTCTRY"
+                or stable_coin_mi(symbol)
+                or fiyat <= 0
+            ):
+                continue
+            gunluk = _ticker_gunluk_yuzde(coin)
+            uygun.append((gunluk, symbol, fiyat))
+            fiyatlar[symbol] = fiyat
+        except Exception:
+            continue
+
+    uygun.sort(reverse=True)
+    ilk10 = uygun[:10]
+    _TOP10_AKTIF_SYMBOLLER = {x[1] for x in ilk10}
+
+    degisti = False
+    # Önce açık gözlemlerin fiyat sonucunu güncelle.
+    for k in TOP10_GOLGE_KAYITLARI:
+        if k.get("tamamlandi"):
+            continue
+        fiyat = fiyatlar.get(k.get("symbol"))
+        giris = float(k.get("giris", 0) or 0)
+        if fiyat and giris > 0:
+            getiri = _pct(fiyat, giris)
+            k["max_getiri"] = round(max(float(k.get("max_getiri", 0) or 0), getiri), 3)
+            k["min_getiri"] = round(min(float(k.get("min_getiri", 0) or 0), getiri), 3)
+            k["son_getiri"] = round(getiri, 3)
+            degisti = True
+        if simdi - float(k.get("zaman", simdi) or simdi) >= TOP10_GOLGE_SURESI:
+            k["tamamlandi"] = True
+            k["tamamlanma_zamani"] = simdi
+            degisti = True
+
+    # Coin aynı gün rolling ilk 10'a ilk kez girdiğinde tek olay aç.
+    for sira, (gunluk, symbol, fiyat) in enumerate(ilk10, 1):
+        mevcut = next(
+            (
+                k for k in reversed(TOP10_GOLGE_KAYITLARI)
+                if k.get("symbol") == symbol and k.get("gun") == gun
+            ),
+            None,
+        )
+        if mevcut is None:
+            TOP10_GOLGE_KAYITLARI.append({
+                "symbol": symbol,
+                "gun": gun,
+                "zaman": simdi,
+                "giris": fiyat,
+                "ilk_sira": sira,
+                "son_sira": sira,
+                "ilk_gunluk_degisim": round(gunluk, 3),
+                "max_gunluk_degisim": round(gunluk, 3),
+                "max_getiri": 0.0,
+                "min_getiri": 0.0,
+                "son_getiri": 0.0,
+                "tamamlandi": False,
+                "asama": "tam_tarama_bekliyor",
+                "telegram_al": False,
+                "telegram_izle": False,
+                "strateji_surumu": STRATEJI_SURUMU,
+            })
+            degisti = True
+        else:
+            mevcut["son_sira"] = sira
+            mevcut["max_gunluk_degisim"] = round(
+                max(float(mevcut.get("max_gunluk_degisim", gunluk) or gunluk), gunluk), 3
+            )
+            degisti = True
+
+    if degisti:
+        _top10_golge_kaydet()
+
+
+def top10_golge_asama_guncelle(symbol, asama, **alanlar):
+    """Bugünkü en yeni ilk-10 olayına tarama kapısını ve ilk teknik resmi yazar."""
+    if symbol not in _TOP10_AKTIF_SYMBOLLER:
+        return
+    gun = _top10_gun_anahtari()
+    kayit = next(
+        (
+            k for k in reversed(TOP10_GOLGE_KAYITLARI)
+            if k.get("symbol") == symbol and k.get("gun") == gun
+        ),
+        None,
+    )
+    if not kayit:
+        return
+    kayit["asama"] = str(asama)
+    for anahtar, deger in alanlar.items():
+        if deger is not None:
+            kayit[anahtar] = deger
+
+
+def _top10_kapi_etiketi(kayit):
+    asama = str(kayit.get("asama", ""))
+    return {
+        "tam_tarama_bekliyor": "tam tarama bekledi",
+        "on_havuz_disinda": "Radar/ön havuza giremedi",
+        "on_havuz_adayi": "ön havuza girdi",
+        "mikro_teyitsiz": "mikro teyit alamadı",
+        "h_bekle": "H motoru BEKLE dedi",
+        "yumusa_filtre": "yumuşak filtre eledi",
+        "tekrar_koruma": "tekrar koruması",
+        "gec_teyit": "geç teyit",
+        "telegram_izle": "Telegram İZLE",
+        "telegram_al": "Telegram AL",
+    }.get(asama, asama or "neden kaydedilemedi")
+
+
+def top10_kacan_hareket_raporu(pencere_bas, pencere_son):
+    """En yüksek 10 rolling hareketi ve tekrar eden kaçırma kapısını raporlar."""
+    pencere = [
+        k for k in TOP10_GOLGE_KAYITLARI
+        if pencere_bas <= float(k.get("zaman", 0) or 0) < pencere_son
+    ]
+    tamam = [k for k in pencere if k.get("tamamlandi")]
+    if not pencere:
+        return (
+            "🔎 İLK 10 KAÇAN HAREKET ANALİZİ\n"
+            "• Bu dönem kayıt oluşmadı; yeni sürüm rolling ilk 10'u gölgede toplamaya başlayacak."
+        )
+
+    liderler = sorted(
+        tamam or pencere,
+        key=lambda k: (
+            float(k.get("max_gunluk_degisim", 0) or 0),
+            float(k.get("max_getiri", 0) or 0),
+        ),
+        reverse=True,
+    )[:10]
+    art3 = [k for k in tamam if float(k.get("max_getiri", 0) or 0) >= 3.0]
+    art5 = [k for k in tamam if float(k.get("max_getiri", 0) or 0) >= 5.0]
+    al_yakaladi = [k for k in art3 if k.get("telegram_al")]
+    izle_yakaladi = [k for k in art3 if k.get("telegram_izle")]
+    kacan = [k for k in art3 if not k.get("telegram_al") and not k.get("telegram_izle")]
+
+    neden_say = {}
+    for k in kacan:
+        etiket = _top10_kapi_etiketi(k)
+        neden_say[etiket] = neden_say.get(etiket, 0) + 1
+    nedenler = sorted(neden_say.items(), key=lambda x: (x[1], x[0]), reverse=True)
+
+    satirlar = [
+        "🔎 İLK 10 KAÇAN HAREKET ANALİZİ — YALNIZ GÖLGE",
+        f"• Rolling ilk 10 olayı={len(pencere)} | tamamlanan={len(tamam)} | bekleyen={len(pencere)-len(tamam)}",
+        f"• İlk 10'a girdikten sonra +%3={len(art3)} | +%5={len(art5)} | Telegram AL yakaladı={len(al_yakaladi)} | İZLE yakaladı={len(izle_yakaladi)} | hiç görünmeyen={len(kacan)}",
+        "",
+        "🏁 DÖNEMİN EN YÜKSEK 10'U",
+    ]
+    for k in liderler:
+        coin = str(k.get("symbol", "")).replace("TRY", "")
+        gorunum = "AL" if k.get("telegram_al") else ("İZLE" if k.get("telegram_izle") else "KAÇTI")
+        satirlar.append(
+            f"• {coin}: gün içi %{float(k.get('max_gunluk_degisim',0) or 0):+.2f} | "
+            f"ilk-10 sonrası tepe %{float(k.get('max_getiri',0) or 0):+.2f} | {gorunum} | {_top10_kapi_etiketi(k)}"
+        )
+
+    satirlar.extend(["", "🚧 EN SIK KAÇIRMA KAPILARI"])
+    if nedenler:
+        for etiket, n in nedenler[:5]:
+            satirlar.append(f"• {etiket}: n={n}")
+    else:
+        satirlar.append("• Tamamlanmış +%3 kaçan hareket yok.")
+
+    # Kod önerisi yalnız ilk-10'a girdikten SONRA yükselenleri kullanır. Coin
+    # listeye zaten +%5 ile girmişse eşik gevşetme delili sayılmaz.
+    on_havuz = sum(1 for k in kacan if k.get("asama") == "on_havuz_disinda")
+    h_bekle = sum(1 for k in kacan if k.get("asama") == "h_bekle")
+    gec = sum(1 for k in kacan if k.get("asama") == "gec_teyit")
+    satirlar.extend(["", "🧩 KOD ÖNERİSİ"])
+    if len(kacan) < TOP10_KOD_ONERI_MIN_ORNEK:
+        satirlar.append(
+            f"• Karar için örnek yetersiz: kaçan +%3 n={len(kacan)}, en az {TOP10_KOD_ONERI_MIN_ORNEK} tamamlanmış kaçan hareket bekleniyor."
+        )
+    if on_havuz:
+        satirlar.append(
+            f"• GÖLGE TEST ADAYI (n={on_havuz}): `ilk10 and gunluk>=1` coinlerini 5 dk teknik izleme havuzuna al; doğrudan AL verme."
+        )
+    if h_bekle:
+        satirlar.append(
+            f"• GÖLGE TEST ADAYI (n={h_bekle}): ilk10 + risk uygun + 3/5dk pozitif H-BEKLE grubunu ayrı ölç; H kapısını henüz gevşetme."
+        )
+    if gec:
+        satirlar.append(
+            f"• ZAMANLAMA ADAYI (n={gec}): geç teyidi kaldırma; coin ilk10'a girer girmez ön havuzu açarak daha erken profil üret."
+        )
+    if not (on_havuz or h_bekle or gec):
+        satirlar.append("• Tekrarlanan ortak kaçırma kapısı henüz oluşmadı; canlı koda eşik önerilmiyor.")
+    satirlar.append(
+        "• Öneriler kodu otomatik değiştirmez; yalnız ilk görülme anından sonraki +%3/+%5 sonuçlarıyla doğrulanır."
+    )
+    return "\n".join(satirlar)
+
 def _planli_3gun_rapor_zamani(simdi, meta):
     """İlk raporu 06.10.2026 08:00 TR'de, sonra her 72 saatte bir gönderir."""
     if simdi < ILK_3GUN_RAPOR_TS:
@@ -378,6 +638,12 @@ def yuzde5_basariraporu_gerekirse_gonder():
     )
     print(mesaj)
     telegram_gonder(mesaj)
+
+    # Telegram'ın tek mesaj sınırını zorlamamak için aynı raporun Top10 keşif
+    # bölümü hemen arkasından ayrı mesaj olarak gider.
+    top10_raporu = top10_kacan_hareket_raporu(pencere_bas, pencere_son)
+    print(top10_raporu)
+    telegram_gonder(top10_raporu)
 
     _YUZDE5_META["son_rapor"] = planli_ts
     _YUZDE5_META["son_planli_rapor_ts"] = planli_ts
@@ -2053,6 +2319,7 @@ def gelistirme_oneri_raporu_gerekirse_gonder():
 
 
 AL_OGRENME_KAYITLARI = _al_ogrenme_yukle()
+TOP10_GOLGE_KAYITLARI = _top10_golge_yukle()
 AL_TAKIP.update(_al_takip_yukle())
 _al_takip_ogrenmeden_tamamla()
 
@@ -2919,6 +3186,7 @@ while True:
 
         # Mevcut ticker cevabını öğrenme katmanında da kullan; ekstra API isteği yok.
         al_ogrenme_guncelle(ticker)
+        top10_golge_ticker_guncelle(ticker)
         rejim_raporu_gerekirse_gonder()
         gelistirme_oneri_raporu_gerekirse_gonder()
         yuzde5_basariraporu_gerekirse_gonder()
@@ -3275,6 +3543,23 @@ while True:
                     or roket_adayi
                 )
 
+                # Rolling ilk 10 için, daha aday olmadan önceki kapıyı sakla.
+                # Böylece rapor yalnız Telegram'a kadar gelebilen coinleri değil,
+                # Radar/ön havuzda kaybolan gerçek kaçakları da açıklayabilir.
+                top10_golge_asama_guncelle(
+                    symbol,
+                    "on_havuz_adayi" if (assistant_ana_aday or mikro_on_alarm) else "on_havuz_disinda",
+                    radar=round(float(radar_skoru or 0), 3),
+                    hacim=round(float(hacim_kat or 0), 3),
+                    degisim1=round(float(degisim1 or 0), 3),
+                    degisim3=round(float(degisim3 or 0), 3),
+                    btc_fark3=round(float(btc_fark3 or 0), 3),
+                    lider=round(float(lider_skoru or 0), 3),
+                    erken_aday=bool(erken_aday),
+                    guc_havuzu_adayi=bool(guc_havuzu_adayi),
+                    mikro_on_alarm=bool(mikro_on_alarm),
+                )
+
                 # Klasik aday değilse bile Mikro Ön Alarm teknik ön havuza sokabilir.
                 # Asıl adaylık biraz aşağıda gerçek 1-3-5-10 dk verisiyle doğrulanır.
                 if not assistant_ana_aday and not mikro_on_alarm:
@@ -3458,6 +3743,13 @@ while True:
                     a["assistant_ana_aday"] = True
                 else:
                     a["mikro_on_alarm_reddedildi"] = True
+                    top10_golge_asama_guncelle(
+                        a.get("symbol"),
+                        "mikro_teyitsiz",
+                        d1=round(float(mikro.get("d1", 0) or 0), 3),
+                        d3=round(float(mikro.get("d3", 0) or 0), 3),
+                        d5=round(float(mikro.get("d5", 0) or 0), 3),
+                    )
 
         # Mikro ön alarmdan gelip teyit alamayanları teknik API çağrısından önce çıkar.
         top10 = [
@@ -3488,6 +3780,21 @@ while True:
             a["kalicilik_skoru"] = kal_skor
             a["kalicilik_etiket"] = kal_etiket
             a["kalicilik_nedenler"] = kal_nedenler
+
+            top10_golge_asama_guncelle(
+                a.get("symbol"),
+                "h_al" if a.get("karar") == "🟢 AL" else "h_bekle",
+                h_karar=str(a.get("karar", "🟡 BEKLE")),
+                ai=round(float(a.get("ai_skoru", 0) or 0), 3),
+                devam=round(float(a.get("devam_gucu", 0) or 0), 3),
+                kalicilik=round(float(a.get("kalicilik_skoru", 0) or 0), 3),
+                rsi=round(float((teknik or {}).get("rsi", 0) or 0), 3),
+                adx=round(float((teknik or {}).get("adx", 0) or 0), 3),
+                d1=round(float((a.get("mikro") or {}).get("d1", 0) or 0), 3),
+                d3=round(float((a.get("mikro") or {}).get("d3", 0) or 0), 3),
+                d5=round(float((a.get("mikro") or {}).get("d5", 0) or 0), 3),
+                d10=round(float((a.get("mikro") or {}).get("d10", 0) or 0), 3),
+            )
 
 
             # --------------------------------------------------
@@ -3604,6 +3911,7 @@ while True:
                 # Telegram yalnızca gerçek AL kararlarında konuşur.
                 # BEKLE ve SAT/PAS arka planda/loglarda izlenmeye devam eder.
                 if "🟢 AL" not in karar:
+                    top10_golge_asama_guncelle(symbol, "h_bekle")
                     continue
 
                 # Aynı AL kararını tekrar gönderme.
@@ -3623,6 +3931,11 @@ while True:
                         + "; ".join(filtre_nedenleri)
                     )
                     filtrelenenler.append(a)
+                    top10_golge_asama_guncelle(
+                        symbol,
+                        "yumusa_filtre",
+                        filtre_nedenleri=list(filtre_nedenleri),
+                    )
                     continue
 
                 tekrar_kabul, tekrar_nedeni = v11_tekrar_mesaji_uygun(a)
@@ -3631,6 +3944,9 @@ while True:
                     # bağımsız hareket kurarsa sonraki taramalarda yeniden sınanır.
                     son_ai_kararlar[symbol] = "🟡 TEKRAR BEKLE"
                     print(f"[V11 TEKRAR KORUMASI] {symbol} | {tekrar_nedeni}")
+                    top10_golge_asama_guncelle(
+                        symbol, "tekrar_koruma", tekrar_nedeni=str(tekrar_nedeni)
+                    )
                     continue
 
                 gonderilecekler.append(a)
@@ -4341,6 +4657,11 @@ while True:
                             + " • ".join(_gec_nedenleri)
                         )
                         gec_teyitler.append(a)
+                        top10_golge_asama_guncelle(
+                            symbol,
+                            "gec_teyit",
+                            gec_nedenleri=list(_gec_nedenleri),
+                        )
                         continue
                     # Telegram'da yalnız erken Üst Düzey/Güçlü/İzle sınıfları
                     # sade tek başlıkla gösterilir.
@@ -4350,12 +4671,18 @@ while True:
                         # Erken fakat kalite puanları henüz yeterli değil.
                         # Görünür izleme mesajıdır; canlı AL ve gerçek emir değildir.
                         erken_izleler.append(a)
+                        top10_golge_asama_guncelle(
+                            symbol, "telegram_izle", telegram_izle=True, v11_seviye=3
+                        )
                         continue
                     # Mesaj gönderildikten sonra sıra olayını kalıcı kayda al.
                     a["_sinyal_event_id"] = _sinyal_sira_ekle(a.get("symbol", ""), a.get("fiyat", 0))
                     # Gönderilmiş her AL için fiyat devamını izler; AL kararını değiştirmez.
                     bes_fiyat_teyit_baslat(a)
                     gonderilenler.append(a)
+                    top10_golge_asama_guncelle(
+                        symbol, "telegram_al", telegram_al=True, v11_seviye=int(_seviye)
+                    )
 
                 # Yalnızca gerçekten gönderilen AL'ları +%5 kâr bildirimi ve 3 saatlik rejim öğrenmesi için takip et.
                 for _a in gonderilenler:
@@ -4385,6 +4712,9 @@ while True:
                         btc_giris_fiyati,
                         kayit_tipi="v11_erken_izle",
                     )
+
+        # Bu taramada eklenen kapı/teknik açıklamalarını tek yazımla kalıcılaştır.
+        _top10_golge_kaydet()
 
         # Ana tarama 60 sn; kâr bildirimi için açık AL'lar 15 sn'de bir kontrol edilir.
         beklenen = 0
