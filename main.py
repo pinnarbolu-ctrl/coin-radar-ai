@@ -94,6 +94,14 @@ GELISTIRME_DUSUK_N = 20
 GELISTIRME_ORTA_N = 50
 GELISTIRME_YUKSEK_N = 100
 
+# Haftalık raporda aynı kalite yapısını tekrar eden dört puanı ayrı ayrı
+# ödüllendirmeden tek gölge blok olarak sınar. Canlı AL filtresine bağlı değil.
+DEVAM_KALITE_GENEL_MIN = 67.50
+DEVAM_KALITE_DEVAM_MIN = 81.45
+DEVAM_KALITE_ODAK_MIN = 74.50
+DEVAM_KALITE_D10_MIN = 0.90
+DEVAM_KALITE_KARAR_MIN = 30
+
 STRATEJI_SURUMU = "V11_ERKEN_YAKALA_DEVAM_GUCU"
 
 # V11 CANLI YUMUŞAK SÜZGEÇ
@@ -2217,6 +2225,118 @@ def _sayisal_etki(kayitlar, alan):
     ru,ra=_basari_orani(ust),_basari_orani(alt)
     return esik,ru,ra,ru-ra,len(ust),len(alt)
 
+
+def _kayit_kimligi(k):
+    return f"{k.get('symbol','')}|{float(k.get('zaman',0) or 0):.3f}|{k.get('kayit_tipi','')}"
+
+
+def _onerilerde_ayni_grubu_birlestir(oneriler):
+    """Aynı coin kümesini seçen Devam/Kalite metriklerini tek öneriye indirir."""
+    aile = {"genel_guc", "genel_devam_bilesen", "al_odak_puani", "devam"}
+    adaylar = [
+        o for o in oneriler
+        if o.get("alan") in aile
+        and o.get("rejim") == "TÜM PİYASA"
+        and float(o.get("fark", 0) or 0) > 0
+        and o.get("uyeler")
+    ]
+    if len(adaylar) < 2:
+        return oneriler
+
+    # En güçlü önerinin seçtiği kümeyle en az %90 örtüşenleri aynı keşif say.
+    lider = max(adaylar, key=lambda o: float(o.get("puan", 0) or 0))
+    lider_uye = set(lider.get("uyeler") or [])
+    benzer = []
+    for o in adaylar:
+        uye = set(o.get("uyeler") or [])
+        birlesim = lider_uye | uye
+        jaccard = len(lider_uye & uye) / len(birlesim) if birlesim else 0.0
+        if jaccard >= 0.90:
+            benzer.append(o)
+    if len(benzer) < 2:
+        return oneriler
+
+    adlar = [str(o.get("ozellik", "")) for o in benzer]
+    esikler = [f"{o.get('ozellik')} ≥{float(o.get('esik',0) or 0):.2f}" for o in benzer]
+    birlesik = dict(lider)
+    birlesik.update({
+        "puan": max(float(o.get("puan", 0) or 0) for o in benzer) + 2.0,
+        "eylem": "BİRLEŞİK BONUSU TEST ET",
+        "ozellik": "Devam Kalitesi (birleşik)",
+        "aciklama": (
+            f"Aynı/çok benzer coin grubunu seçen {len(benzer)} ölçüm tek keşifte birleştirildi: "
+            + ", ".join(adlar)
+            + f". Lider ayrım: +%5 %{float(lider.get('ust_oran',0) or 0):.1f} / "
+              f"alt %{float(lider.get('alt_oran',0) or 0):.1f} "
+              f"(n={int(lider.get('n_ust',0) or 0)}/{int(lider.get('n_alt',0) or 0)})."
+        ),
+        "kod": (
+            "Ayrı ayrı puan/bonus verme. Tek Devam Kalitesi gölge etiketi kullan: "
+            + " + ".join(esikler)
+            + ". Canlı AL kapısını değiştirme."
+        ),
+        "birlesen_alanlar": [o.get("alan") for o in benzer],
+    })
+    benzer_id = {id(o) for o in benzer}
+    sonuc = [o for o in oneriler if id(o) not in benzer_id]
+    sonuc.append(birlesik)
+    return sonuc
+
+
+def _devam_kalitesi_golge_raporu(kayitlar):
+    """Sabit birleşik kalite eşiğini ve 10dk ek teyidini canlı kodu değiştirmeden ölçer."""
+    if not kayitlar:
+        return ["🧪 DEVAM KALİTESİ BİRLEŞİK GÖLGE TESTİ", "• Ölçülebilir kayıt yok."]
+
+    def kalite(k):
+        return (
+            float(k.get("genel_guc", 0) or 0) >= DEVAM_KALITE_GENEL_MIN
+            and float(k.get("devam", 0) or 0) >= DEVAM_KALITE_DEVAM_MIN
+            and float(k.get("al_odak_puani", 0) or 0) >= DEVAM_KALITE_ODAK_MIN
+        )
+
+    tum = list(kayitlar)
+    q = [k for k in tum if kalite(k)]
+    q10 = [k for k in q if float(k.get("d10", 0) or 0) >= DEVAM_KALITE_D10_MIN]
+    dis = [k for k in tum if k not in q]
+    kazananlar = [k for k in tum if float(k.get("max_getiri", 0) or 0) >= 5.0]
+
+    def satir(ad, grup):
+        n = len(grup)
+        p3 = sum(1 for k in grup if float(k.get("max_getiri", 0) or 0) >= 3.0) / n * 100.0 if n else 0.0
+        p5 = _basari_orani(grup)
+        yanlis = (
+            sum(
+                1 for k in grup
+                if float(k.get("max_getiri", 0) or 0) < 5.0
+                and float(k.get("min_getiri", 0) or 0) <= -2.5
+            ) / n * 100.0
+            if n else 0.0
+        )
+        kacirilan = sum(1 for k in kazananlar if k not in grup)
+        return f"• {ad}: n={n} | +%3 %{p3:.1f} | +%5 %{p5:.1f} | yanlış %{yanlis:.1f} | dışarıda kalan +%5={kacirilan}"
+
+    gunler = {g for g in (_gun_anahtari(k) for k in q) if g}
+    rejimler = {str(k.get("piyasa_rejim")) for k in q if k.get("piyasa_rejim")}
+    satirlar = [
+        "🧪 DEVAM KALİTESİ BİRLEŞİK GÖLGE TESTİ",
+        satir("Devam Kalitesi", q),
+        satir(f"Devam Kalitesi + 10dk ≥%{DEVAM_KALITE_D10_MIN:.2f}", q10),
+        satir("Kalite dışı karşılaştırma", dis),
+        (
+            f"• Eşik: Genel ≥{DEVAM_KALITE_GENEL_MIN:.2f} + Devam ≥{DEVAM_KALITE_DEVAM_MIN:.2f} "
+            f"+ Ana odak ≥{DEVAM_KALITE_ODAK_MIN:.2f}"
+        ),
+    ]
+    if len(q) < DEVAM_KALITE_KARAR_MIN or len(gunler) < 3 or len(rejimler) < 2:
+        satirlar.append(
+            f"• KARAR YOK: kalite n={len(q)}/{DEVAM_KALITE_KARAR_MIN} | gün={len(gunler)}/3 | rejim={len(rejimler)}/2."
+        )
+    else:
+        satirlar.append("• Doğrulama eşiği tamamlandı; canlı bonus öncesi kaçırılan kazananlar manuel incelenmeli.")
+    satirlar.append("• Tek birleşik etikettir; dört metriğe ayrı bonus verilmez ve canlı AL değişmez.")
+    return satirlar
+
 def _bayrak_etki(kayitlar, anahtar):
     var=[x for x in kayitlar if _ozellik_var(x,anahtar)]
     yok=[x for x in kayitlar if not _ozellik_var(x,anahtar)]
@@ -2439,10 +2559,16 @@ def _gelistirme_onerileri_uret(kayitlar):
         gun,tg,rej,tr = _yon_tekrari_sayisal(kayitlar, alan, fark)
         guven = _guven_hesapla(fark, len(kayitlar), gun, tg, rej, tr)
         eylem = _eylem_stabilize(_eylem_sec(ad,fark), fark, guven)
+        uyeler = [
+            _kayit_kimligi(x) for x in kayitlar
+            if x.get(alan) is not None and float(x.get(alan)) >= esik
+        ]
         oneriler.append({
             "puan":abs(fark),"eylem":eylem,"ozellik":ad,"rejim":"TÜM PİYASA",
             "aciklama":f"{ad} >= {esik:.2f} grubunda +%5 başarı %{ru:.1f}; altında %{ra:.1f} (n={nu}/{na}).",
-            "kod":kod_aciklama,"guven":guven
+            "kod":kod_aciklama,"guven":guven,
+            "alan":alan,"fark":fark,"esik":esik,"ust_oran":ru,"alt_oran":ra,
+            "n_ust":nu,"n_alt":na,"uyeler":uyeler,
         })
 
     for anahtar,ad in bayraklar:
@@ -2516,6 +2642,10 @@ def _gelistirme_onerileri_uret(kayitlar):
 
     # 5) Aşırı yüksek skorların "daha güçlü" değil, geç/doygun hareket işareti olduğu paradoksları ara.
     oneriler.extend(_asiri_yuksek_paradoks_onerileri(kayitlar))
+
+    # Aynı coin kümesini seçen Genel/Devam/Ana odak ölçümlerini beş ayrı
+    # keşif gibi yazma; tek birleşik kalite önerisine indir.
+    oneriler = _onerilerde_ayni_grubu_birlestir(oneriler)
 
     # Güven ve tekrar sayısını öncelik puanına da yansıt.
     for o in oneriler:
@@ -2661,6 +2791,7 @@ def gelistirme_oneri_raporu_gerekirse_gonder():
         return
     oneriler = _gelistirme_onerileri_uret(son7)
     mesaj_onerileri = _mesaj_gelistirme_onerileri(son7, oneriler)
+    devam_kalite_mesaj = "\n".join(_devam_kalitesi_golge_raporu(son7))
     if not oneriler:
         satirlar = [
             "🧠 ASSISTANT HAFTALIK KOD + PİYASA GELİŞTİRME ÖNERİSİ",
@@ -2700,6 +2831,10 @@ def gelistirme_oneri_raporu_gerekirse_gonder():
         mesaj = "\n".join(satirlar)
     print(mesaj)
     telegram_gonder(mesaj)
+    # Ana haftalık mesaj Telegram sınırını aşmasın; birleşik gölge testi hemen
+    # arkasından ayrı fakat aynı haftalık raporun parçası olarak gönderilir.
+    print(devam_kalite_mesaj)
+    telegram_gonder(devam_kalite_mesaj)
     SON_GELISTIRME_RAPOR_ZAMANI = simdi
     _gelistirme_son_zaman_kaydet(simdi)
 
