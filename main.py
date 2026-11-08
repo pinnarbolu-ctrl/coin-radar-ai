@@ -150,6 +150,15 @@ TOP10_GOLGE_MAX_KAYIT = 3000
 TOP10_KOD_ONERI_MIN_ORNEK = 8
 _TOP10_AKTIF_SYMBOLLER = set()
 
+# Rolling ilk 10'a günlük en az +%1 ile giren coinleri normal Radar/tam tarama
+# kapısını beklemeden beş dakika boyunca yalnız gölgede inceler. Bu havuz canlı
+# aday listesine eklenmez, Telegram veya gerçek emir üretmez.
+TOP10_HIZLI_GUNLUK_MIN = 1.0
+TOP10_HIZLI_TAKIP_SURESI = 5 * 60
+TOP10_HIZLI_DONUS_TEYIDI = 0.5
+TOP10_HIZLI_CEKILISLER = (1.0, 1.5, 2.0)
+TOP10_HIZLI_KARAR_MIN = 30
+
 # Telegram Üst/Güçlü AL ve İZLE mesajından sonra giriş zamanını ölçen gölge
 # deney. Sınıflar ayrı raporlanır; canlı mesajı, AL kararını veya gerçek emri
 # değiştirmez.
@@ -203,6 +212,132 @@ def _ticker_gunluk_yuzde(coin):
         return _pct(son, acilis) if son > 0 and acilis > 0 else 0.0
     except Exception:
         return 0.0
+
+
+def _top10_hizli_varyant_anahtari(esik):
+    return f"donus_{float(esik):.1f}"
+
+
+def _top10_hizli_varyantlar_yeni():
+    return {
+        _top10_hizli_varyant_anahtari(esik): {
+            "esik": float(esik), "kuruldu": False, "dip_fiyat": None,
+            "giris": None, "giris_zamani": None, "max_getiri": None,
+            "min_getiri": None, "son_getiri": None,
+        }
+        for esik in TOP10_HIZLI_CEKILISLER
+    }
+
+
+def _top10_bugunku_kayit(symbol):
+    gun = _top10_gun_anahtari()
+    return next(
+        (k for k in reversed(TOP10_GOLGE_KAYITLARI)
+         if k.get("symbol") == symbol and k.get("gun") == gun),
+        None,
+    )
+
+
+def top10_hizli_aktif_mi(symbol=None):
+    """İlk 5 dakikalık hızlı gölge havuzunun aktif olup olmadığını döndürür."""
+    simdi = time.time()
+    for k in TOP10_GOLGE_KAYITLARI:
+        if symbol and k.get("symbol") != symbol:
+            continue
+        if not k.get("hizli_takip_uygun") or k.get("tamamlandi"):
+            continue
+        if simdi - float(k.get("zaman", simdi) or simdi) <= TOP10_HIZLI_TAKIP_SURESI:
+            return True
+    return False
+
+
+def top10_hizli_fiyat_guncelle(ticker):
+    """Hızlı havuzda çekiliş+dönüş girişini ve sonraki getiriyi gölgede ölçer."""
+    if not TOP10_GOLGE_KAYITLARI:
+        return
+    fiyatlar = {}
+    for coin in ticker:
+        try:
+            symbol = str(coin.get("pair", ""))
+            fiyat = float(coin.get("last", 0) or 0)
+            if symbol and fiyat > 0:
+                fiyatlar[symbol] = fiyat
+        except Exception:
+            continue
+
+    simdi = time.time()
+    degisti = False
+    for k in TOP10_GOLGE_KAYITLARI:
+        if not k.get("hizli_takip_uygun") or k.get("tamamlandi"):
+            continue
+        fiyat = fiyatlar.get(k.get("symbol"))
+        ilk = float(k.get("giris", 0) or 0)
+        if not fiyat or ilk <= 0:
+            continue
+        gecen = simdi - float(k.get("zaman", simdi) or simdi)
+        varyantlar = k.setdefault("hizli_donuslar", _top10_hizli_varyantlar_yeni())
+
+        if gecen <= TOP10_HIZLI_TAKIP_SURESI:
+            k["hizli_dip"] = min(float(k.get("hizli_dip", ilk) or ilk), fiyat)
+            k["hizli_tepe"] = max(float(k.get("hizli_tepe", ilk) or ilk), fiyat)
+            ilk_getiri = _pct(fiyat, ilk)
+            for esik in TOP10_HIZLI_CEKILISLER:
+                anahtar = _top10_hizli_varyant_anahtari(esik)
+                v = varyantlar.setdefault(anahtar, _top10_hizli_varyantlar_yeni()[anahtar])
+                if ilk_getiri <= -float(esik):
+                    v["kuruldu"] = True
+                    eski_dip = v.get("dip_fiyat")
+                    v["dip_fiyat"] = fiyat if not eski_dip else min(float(eski_dip), fiyat)
+                if v.get("kuruldu") and not v.get("giris"):
+                    dip = float(v.get("dip_fiyat", 0) or 0)
+                    if dip > 0 and _pct(fiyat, dip) >= TOP10_HIZLI_DONUS_TEYIDI:
+                        v["giris"] = fiyat
+                        v["giris_zamani"] = simdi
+                        v["max_getiri"] = 0.0
+                        v["min_getiri"] = 0.0
+            k["hizli_son_fiyat"] = fiyat
+            k["hizli_son_guncelleme"] = simdi
+
+        for v in varyantlar.values():
+            giris = float(v.get("giris", 0) or 0)
+            if giris <= 0:
+                continue
+            getiri = _pct(fiyat, giris)
+            v["max_getiri"] = round(max(float(v.get("max_getiri", 0) or 0), getiri), 3)
+            v["min_getiri"] = round(min(float(v.get("min_getiri", 0) or 0), getiri), 3)
+            v["son_getiri"] = round(getiri, 3)
+        degisti = True
+
+    if degisti:
+        _top10_golge_kaydet()
+
+
+def top10_hizli_teknik_kaydet(symbol, mikro=None, teknik=None, **alanlar):
+    """Canlı kararı etkilemeden ilk 5 dakikanın teknik fotoğrafını saklar."""
+    kayit = _top10_bugunku_kayit(symbol)
+    if not kayit or not kayit.get("hizli_takip_uygun"):
+        return
+    if time.time() - float(kayit.get("zaman", 0) or 0) > TOP10_HIZLI_TAKIP_SURESI:
+        return
+    mikro = mikro or {}
+    teknik = teknik or {}
+    ornek = {
+        "zaman": time.time(),
+        "d1": round(float(mikro.get("d1", 0) or 0), 3),
+        "d3": round(float(mikro.get("d3", 0) or 0), 3),
+        "d5": round(float(mikro.get("d5", 0) or 0), 3),
+        "d10": round(float(mikro.get("d10", 0) or 0), 3),
+        "rsi": round(float(teknik.get("rsi", 0) or 0), 3),
+        "adx": round(float(teknik.get("adx", 0) or 0), 3),
+        "ema_yukari": bool(
+            teknik.get("ema20") is not None and teknik.get("ema50") is not None
+            and float(teknik.get("ema20")) > float(teknik.get("ema50"))
+        ),
+    }
+    ornek.update({k: v for k, v in alanlar.items() if v is not None})
+    kayit.setdefault("hizli_teknik_ornekler", []).append(ornek)
+    kayit["hizli_teknik_ornekler"] = kayit["hizli_teknik_ornekler"][-6:]
+    _top10_golge_kaydet()
 
 
 def top10_golge_ticker_guncelle(ticker):
@@ -261,6 +396,7 @@ def top10_golge_ticker_guncelle(ticker):
             None,
         )
         if mevcut is None:
+            hizli_uygun = gunluk >= TOP10_HIZLI_GUNLUK_MIN
             TOP10_GOLGE_KAYITLARI.append({
                 "symbol": symbol,
                 "gun": gun,
@@ -277,6 +413,11 @@ def top10_golge_ticker_guncelle(ticker):
                 "asama": "tam_tarama_bekliyor",
                 "telegram_al": False,
                 "telegram_izle": False,
+                "hizli_takip_uygun": bool(hizli_uygun),
+                "hizli_dip": fiyat,
+                "hizli_tepe": fiyat,
+                "hizli_donuslar": _top10_hizli_varyantlar_yeni() if hizli_uygun else {},
+                "hizli_teknik_ornekler": [],
                 "strateji_surumu": STRATEJI_SURUMU,
             })
             degisti = True
@@ -289,6 +430,9 @@ def top10_golge_ticker_guncelle(ticker):
 
     if degisti:
         _top10_golge_kaydet()
+
+    # İlk 10'a yeni giren kayıt da aynı ticker turunda hızlı ölçüme başlasın.
+    top10_hizli_fiyat_guncelle(ticker)
 
 
 def top10_golge_asama_guncelle(symbol, asama, **alanlar):
@@ -409,6 +553,63 @@ def top10_kacan_hareket_raporu(pencere_bas, pencere_son):
     satirlar.append(
         "• Öneriler kodu otomatik değiştirmez; yalnız ilk görülme anından sonraki +%3/+%5 sonuçlarıyla doğrulanır."
     )
+
+    hizli = [k for k in pencere if k.get("hizli_takip_uygun")]
+    hizli_tamam = [k for k in hizli if k.get("tamamlandi")]
+    teknikli = [k for k in hizli if k.get("hizli_teknik_ornekler")]
+    satirlar.extend([
+        "",
+        "⚡ İLK 10 HIZLI TAKİP + DÖNÜŞ — YALNIZ GÖLGE",
+        f"• Günlük ≥+%{TOP10_HIZLI_GUNLUK_MIN:.0f}: aday={len(hizli)} | "
+        f"tamamlanan={len(hizli_tamam)} | teknik profil alınan={len(teknikli)}",
+        f"• İlk-10 fiyatından: +%3 %{_hedef_orani(hizli_tamam, 3):.1f} | "
+        f"+%5 %{_hedef_orani(hizli_tamam, 5):.1f} | yanlış %{_yanlis_orani(hizli_tamam):.1f}",
+        f"• Hızlı pencere={TOP10_HIZLI_TAKIP_SURESI//60}dk | "
+        f"dönüş teyidi=dipten +%{TOP10_HIZLI_DONUS_TEYIDI:.1f} | Telegram/AL yok",
+    ])
+    for esik in TOP10_HIZLI_CEKILISLER:
+        anahtar = _top10_hizli_varyant_anahtari(esik)
+        giren = []
+        for k in hizli_tamam:
+            v = (k.get("hizli_donuslar") or {}).get(anahtar) or {}
+            if v.get("giris"):
+                giren.append(v)
+        p3 = (
+            sum(1 for v in giren if float(v.get("max_getiri", 0) or 0) >= 3)
+            / len(giren) * 100 if giren else 0.0
+        )
+        p5 = (
+            sum(1 for v in giren if float(v.get("max_getiri", 0) or 0) >= 5)
+            / len(giren) * 100 if giren else 0.0
+        )
+        yanlis = (
+            sum(
+                1 for v in giren
+                if float(v.get("max_getiri", 0) or 0) < 5
+                and float(v.get("min_getiri", 0) or 0) <= -2.5
+            ) / len(giren) * 100 if giren else 0.0
+        )
+        satirlar.append(
+            f"• -%{esik:.1f} + dönüş: giriş n={len(giren)} | +%3 %{p3:.1f} | "
+            f"+%5 %{p5:.1f} | yanlış %{yanlis:.1f}"
+        )
+    dogrudan = [
+        k for k in hizli_tamam
+        if not ((k.get("hizli_donuslar") or {}).get(
+            _top10_hizli_varyant_anahtari(1.0)
+        ) or {}).get("kuruldu")
+        and float(k.get("max_getiri", 0) or 0) >= 3.0
+    ]
+    satirlar.append(f"• -%1 çekilmeden doğrudan +%3 yapan={len(dogrudan)}")
+    if len(hizli_tamam) < TOP10_HIZLI_KARAR_MIN:
+        satirlar.append(
+            f"• Canlı değişiklik yok: karar için en az {TOP10_HIZLI_KARAR_MIN} "
+            "tamamlanmış hızlı takip bekleniyor."
+        )
+    else:
+        satirlar.append(
+            "• Yeterli örnek oluştu; başarı, yanlış ve kazanan koruma birlikte incelenmeli."
+        )
     return "\n".join(satirlar)
 
 
@@ -899,7 +1100,10 @@ def yuzde5_basariraporu_gerekirse_gonder():
     seviye2_tamam = [
         x for x in filtre_tamam if int(x.get("v11_seviye", 0) or 0) == 2
     ]
-    filtre_kabul = [
+    kalite_kabul = [
+        x for x in filtre_tamam if bool(x.get("v11_filtre_kabul"))
+    ]
+    canli_al_tamam = [
         x for x in filtre_tamam
         if bool(x.get("v11_filtre_kabul"))
         and x not in gec_teyit_tamam
@@ -924,7 +1128,7 @@ def yuzde5_basariraporu_gerekirse_gonder():
         1 for x in filtre_tamam if float(x.get("max_getiri", 0) or 0) >= 2.0
     )
     korunan_iki = sum(
-        1 for x in filtre_kabul if float(x.get("max_getiri", 0) or 0) >= 2.0
+        1 for x in kalite_kabul if float(x.get("max_getiri", 0) or 0) >= 2.0
     )
     iki_koruma = (korunan_iki / toplam_iki * 100.0) if toplam_iki else 0.0
     veto_yanlis = sum(
@@ -960,12 +1164,14 @@ def yuzde5_basariraporu_gerekirse_gonder():
 
     filtre_metni = (
         "\n\n🧹 V11 CANLI YUMUŞAK SÜZGEÇ\n"
-        f"• Tamamlanan aday={len(filtre_tamam)} | gönderilen={len(filtre_kabul)} | "
-        f"elenen={len(filtre_veto)} | eleme %{eleme_orani:.1f} | bekleyen={len(filtre_acik)}\n"
-        f"• Gönderilen: +%2 %{_hedef_orani(filtre_kabul, 2):.1f} | "
-        f"+%3 %{_hedef_orani(filtre_kabul, 3):.1f} | +%5 %{_hedef_orani(filtre_kabul, 5):.1f}\n"
-        f"• Elenen: +%2 %{_hedef_orani(filtre_veto, 2):.1f} | "
+        f"• Tamamlanan aday={len(filtre_tamam)} | kalite kabul={len(kalite_kabul)} | "
+        f"kalite veto={len(filtre_veto)} | veto %{eleme_orani:.1f} | bekleyen={len(filtre_acik)}\n"
+        f"• Kalite kabul: +%2 %{_hedef_orani(kalite_kabul, 2):.1f} | "
+        f"+%3 %{_hedef_orani(kalite_kabul, 3):.1f} | +%5 %{_hedef_orani(kalite_kabul, 5):.1f}\n"
+        f"• Kalite veto: +%2 %{_hedef_orani(filtre_veto, 2):.1f} | "
         f"+%3 %{_hedef_orani(filtre_veto, 3):.1f} | +%5 %{_hedef_orani(filtre_veto, 5):.1f}\n"
+        f"• Kabul dağılımı: canlı AL={len(canli_al_tamam)} | "
+        f"İZLE={len(erken_izle_tamam)} | geç teyit={len(gec_teyit_tamam)}\n"
         "\n⏱️ V11 GİRİŞ ZAMANI KORUMASI\n"
         f"• Geç teyit: n={len(gec_teyit_tamam)} | "
         f"+%2 %{_hedef_orani(gec_teyit_tamam, 2):.1f} | "
@@ -1004,7 +1210,7 @@ def yuzde5_basariraporu_gerekirse_gonder():
         f"n={len(temiz_mom_yolu)} | +%2 %{_hedef_orani(temiz_mom_yolu, 2):.1f} | "
         f"+%3 %{_hedef_orani(temiz_mom_yolu, 3):.1f} | "
         f"+%5 %{_hedef_orani(temiz_mom_yolu, 5):.1f}\n"
-        f"• +%2 hareket koruma %{iki_koruma:.1f} | "
+        f"• Kalite süzgeci +%2 hareket koruma %{iki_koruma:.1f} | "
         f"elenenlerde yanlış tepki %{veto_yanlis_oran:.1f}\n"
         "• BEAM/HOT yolu kalite süzgecinde korunur; fakat giriş zamanı korumasını "
         "geçmek zorundadır. Parçalı/sönen momentum ve birleşik zayıflık ayrıca ayıklanır."
@@ -3728,6 +3934,7 @@ while True:
         piyasa_degisim1leri = []
         piyasa_degisim3leri = []
         adaylar = []
+        top10_hizli_golge_adaylar = []
 
         for coin in ticker:
             try:
@@ -3769,7 +3976,13 @@ while True:
                 if izleme_bitis and not havuzda:
                     guc_izleme_havuzu.pop(symbol, None)
 
-                if not tam_tarama and abs(hizli_degisim) < HIZLI_HAREKET_ESIGI and not havuzda:
+                top10_hizli_golge = top10_hizli_aktif_mi(symbol)
+                if (
+                    not tam_tarama
+                    and abs(hizli_degisim) < HIZLI_HAREKET_ESIGI
+                    and not havuzda
+                    and not top10_hizli_golge
+                ):
                     continue
 
                 if not tam_tarama:
@@ -4086,6 +4299,17 @@ while True:
                 # Klasik aday değilse bile Mikro Ön Alarm teknik ön havuza sokabilir.
                 # Asıl adaylık biraz aşağıda gerçek 1-3-5-10 dk verisiyle doğrulanır.
                 if not assistant_ana_aday and not mikro_on_alarm:
+                    if top10_hizli_golge:
+                        top10_hizli_golge_adaylar.append({
+                            "symbol": symbol,
+                            "fiyat": fiyat,
+                            "radar_skoru": radar_skoru,
+                            "hacim": round(hacim_kat, 2),
+                            "degisim1": round(degisim1, 2),
+                            "degisim3": round(degisim3, 2),
+                            "btc_fark3": round(btc_fark3, 2),
+                            "lider_skoru": round(lider_skoru, 2),
+                        })
                     continue
 
                 if yildiz_adayi:
@@ -4280,6 +4504,26 @@ while True:
             if a.get("assistant_ana_aday") and not a.get("mikro_on_alarm_reddedildi")
         ]
 
+        # İlk 10 hızlı havuzu canlı aday üretmez. Normal havuza giremeyen coinler
+        # için yalnız ilk beş dakikanın mikro/teknik fotoğrafını kaydeder.
+        canli_havuz_symbol = {a.get("symbol") for a in top10}
+        for _g in top10_hizli_golge_adaylar:
+            if _g.get("symbol") in canli_havuz_symbol:
+                continue
+            try:
+                _gm = mikro_ivme_hesapla(_g["symbol"])
+                _gt = teknik_analiz_hesapla(_g["symbol"])
+                top10_hizli_teknik_kaydet(
+                    _g["symbol"], mikro=_gm, teknik=_gt,
+                    radar=round(float(_g.get("radar_skoru", 0) or 0), 3),
+                    hacim=round(float(_g.get("hacim", 0) or 0), 3),
+                    degisim1=round(float(_g.get("degisim1", 0) or 0), 3),
+                    degisim3=round(float(_g.get("degisim3", 0) or 0), 3),
+                    btc_fark3=round(float(_g.get("btc_fark3", 0) or 0), 3),
+                )
+            except Exception as e:
+                print(f"[TOP10 HIZLI GÖLGE] {_g.get('symbol')} teknik hata:", e)
+
         # H mantığı: Radar Top10 + Çoklu Güç + teyitli Mikro Erken üzerinde teknik analiz + karar motoru.
         for a in top10:
             teknik = teknik_analiz_hesapla(a["symbol"])
@@ -4317,6 +4561,14 @@ while True:
                 d3=round(float((a.get("mikro") or {}).get("d3", 0) or 0), 3),
                 d5=round(float((a.get("mikro") or {}).get("d5", 0) or 0), 3),
                 d10=round(float((a.get("mikro") or {}).get("d10", 0) or 0), 3),
+            )
+            top10_hizli_teknik_kaydet(
+                a.get("symbol"), mikro=a.get("mikro") or {}, teknik=teknik or {},
+                radar=round(float(a.get("radar_skoru", 0) or 0), 3),
+                hacim=round(float(a.get("hacim", 0) or 0), 3),
+                degisim1=round(float(a.get("degisim1", 0) or 0), 3),
+                degisim3=round(float(a.get("degisim3", 0) or 0), 3),
+                btc_fark3=round(float(a.get("btc_fark3", 0) or 0), 3),
             )
 
 
@@ -5248,13 +5500,14 @@ while True:
             time.sleep(sure)
             beklenen += sure
 
-            if AL_TAKIP or giris_zamani_deneyi_aktif_mi():
+            if AL_TAKIP or giris_zamani_deneyi_aktif_mi() or top10_hizli_aktif_mi():
                 try:
                     r = requests.get("https://api.btcturk.com/api/v2/ticker", timeout=10)
                     r.raise_for_status()
                     _ara_ticker = r.json().get("data", [])
                     al_takip_guncelle(_ara_ticker)
                     giris_zamani_deneyi_guncelle(_ara_ticker)
+                    top10_hizli_fiyat_guncelle(_ara_ticker)
                 except Exception as e:
                     print("Kâr/giriş zamanı takip hatası:", e)
 
