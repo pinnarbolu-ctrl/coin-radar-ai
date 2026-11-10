@@ -128,6 +128,14 @@ V11_UST_DUZEY_ERKEN_MIN = 60
 V11_SEVIYE2_AI_MIN = 90.0
 V11_SEVIYE2_DEVAM_MIN = 80.0
 V11_SEVIYE2_RADAR_MIN = 60.0
+# Üst Düzey AL içindeki daha kontrollü alt profil. Bu sınıf yalnız mesaj ve
+# öğrenme ayrımıdır; otomatik/gerçek emir üretmez ve V11 AL kapısını değiştirmez.
+V11_KONTROLLU_DEVAM_MIN = 82.0
+V11_KONTROLLU_KALICILIK_MIN = 88.0
+V11_KONTROLLU_KALICILIK_MAX = 94.0
+V11_KONTROLLU_ADX_MIN = 30.0
+V11_KONTROLLU_RSI_MIN = 52.0
+V11_KONTROLLU_RSI_MAX = 70.0
 
 # 3 günlük ortak karşılaştırma raporu
 
@@ -1094,8 +1102,13 @@ def yuzde5_basariraporu_gerekirse_gonder():
         if str(x.get("kayit_tipi", "")) == "v11_erken_izle"
         or int(x.get("v11_seviye", 0) or 0) == 3
     ]
+    kontrollu_ust_tamam = [
+        x for x in filtre_tamam if bool(x.get("v11_kontrollu_ust_duzey"))
+    ]
     seviye1_tamam = [
-        x for x in filtre_tamam if int(x.get("v11_seviye", 0) or 0) == 1
+        x for x in filtre_tamam
+        if int(x.get("v11_seviye", 0) or 0) == 1
+        and not bool(x.get("v11_kontrollu_ust_duzey"))
     ]
     seviye2_tamam = [
         x for x in filtre_tamam if int(x.get("v11_seviye", 0) or 0) == 2
@@ -1144,6 +1157,7 @@ def yuzde5_basariraporu_gerekirse_gonder():
     # karşılaştır. Küçük örneklemde yalnız geçici lider gösterilir; canlı
     # eşikler veya mesaj kapıları otomatik değiştirilmez.
     seviye_gruplari = [
+        ("🛡️ Kontrollü Üst Düzey AL", kontrollu_ust_tamam),
         ("🏆 Üst Düzey AL", seviye1_tamam),
         ("💎 Güçlü AL", seviye2_tamam),
         ("🌱 İzle", erken_izle_tamam),
@@ -1182,6 +1196,11 @@ def yuzde5_basariraporu_gerekirse_gonder():
         f"10dk >%{V11_GEC_D10_MAX:.1f} veya RSI >{V11_GEC_RSI_MAX:.0f}; "
         "Telegram'a gönderilmez; gölgede ölçülür.\n"
         "\n🧭 V11 MESAJ SINIFLARI — +%3 KARŞILAŞTIRMASI\n"
+        f"• 🛡️ Kontrollü Üst Düzey AL: n={len(kontrollu_ust_tamam)} | "
+        f"+%2 %{_hedef_orani(kontrollu_ust_tamam, 2):.1f} | "
+        f"+%3 %{_hedef_orani(kontrollu_ust_tamam, 3):.1f} | "
+        f"+%5 %{_hedef_orani(kontrollu_ust_tamam, 5):.1f} | "
+        f"yanlış %{_yanlis_orani(kontrollu_ust_tamam):.1f}\n"
         f"• 🏆 Üst Düzey AL: n={len(seviye1_tamam)} | "
         f"+%2 %{_hedef_orani(seviye1_tamam, 2):.1f} | "
         f"+%3 %{_hedef_orani(seviye1_tamam, 3):.1f} | "
@@ -1198,7 +1217,7 @@ def yuzde5_basariraporu_gerekirse_gonder():
         f"+%5 %{_hedef_orani(erken_izle_tamam, 5):.1f} | "
         f"yanlış %{_yanlis_orani(erken_izle_tamam):.1f}\n"
         f"{uc_lider_metni}"
-        "• Kalıcı +%3 lideri için üç grupta da en az 8 tamamlanmış sinyal beklenir; "
+        "• Kalıcı +%3 lideri için dört grupta da en az 8 tamamlanmış sinyal beklenir; "
         "ölçüm canlı kararı otomatik değiştirmez.\n"
         "• Erken Yakalama puanı tek başına geç kalma vetosu değildir; "
         "zamanlama gerçek 5/10dk hareketi ve RSI ile, kalite ayrı puanlarla ölçülür.\n"
@@ -2039,6 +2058,7 @@ def al_ogrenme_baslat(
         "v11_gec_teyit": bool(aday.get("v11_gec_teyit")),
         "v11_gec_teyit_nedenleri": list(aday.get("v11_gec_teyit_nedenleri", [])),
         "v11_seviye": int(aday.get("v11_seviye", 0) or 0),
+        "v11_kontrollu_ust_duzey": bool(aday.get("v11_kontrollu_ust_duzey")),
     }
     AL_OGRENME_KAYITLARI.append(kayit)
     _al_ogrenme_kaydet()
@@ -5377,9 +5397,42 @@ while True:
                         and float(a.get("devam_gucu", 0) or 0) >= V11_SEVIYE2_DEVAM_MIN
                         and float(a.get("radar_skoru", 0) or 0) >= V11_SEVIYE2_RADAR_MIN
                     )
+
+                    # KONTROLLÜ ÜST DÜZEY AL
+                    # Mevcut Üst Düzey AL'ı değiştirmez; onun içinden devam,
+                    # kalıcılık, trend sağlığı ve piyasa desteği birlikte uygun
+                    # olanları görünür ve ayrı ölçülebilir bir alt profil yapar.
+                    # Otomatik/gerçek emir üretmez.
+                    _kontrollu_piyasa_uygun = bool(
+                        _destek_etiket != "🔴 ZAYIF"
+                        and _btc_sok_puani < 18
+                        and "SAHTE KIRILIM" not in str(_piyasa_devam_etiket)
+                    )
+                    _kontrollu_ust_duzey = bool(
+                        _seviye1
+                        and _al_odak_puani >= V11_KONTROLLU_DEVAM_MIN
+                        and _rel >= 2
+                        and V11_KONTROLLU_KALICILIK_MIN
+                        <= _kalicilik <= V11_KONTROLLU_KALICILIK_MAX
+                        and _ema_yon == "Yukarı"
+                        and _macd_yon == "Pozitif"
+                        and _adx_num >= V11_KONTROLLU_ADX_MIN
+                        and _rsi is not None
+                        and V11_KONTROLLU_RSI_MIN
+                        <= float(_rsi) <= V11_KONTROLLU_RSI_MAX
+                        and float(_d3 or 0) > 0
+                        and float(_d5 or 0) > 0
+                        and _kontrollu_piyasa_uygun
+                    )
+                    a["v11_kontrollu_ust_duzey"] = _kontrollu_ust_duzey
+                    a["v11_kontrollu_piyasa_uygun"] = _kontrollu_piyasa_uygun
+
                     if _gec_teyit:
                         _seviye = 0
                         _seviye_basligi = "⚠️ GEÇ TEYİT — ALMA / OTOMATİK EMİR YOK\n"
+                    elif _kontrollu_ust_duzey:
+                        _seviye = 1
+                        _seviye_basligi = "🛡️ KONTROLLÜ ÜST DÜZEY AL\n"
                     elif _seviye1:
                         _seviye = 1
                         _seviye_basligi = "🏆 ÜST DÜZEY AL\n"
@@ -5457,7 +5510,11 @@ while True:
                     bes_fiyat_teyit_baslat(a)
                     gonderilenler.append(a)
                     top10_golge_asama_guncelle(
-                        symbol, "telegram_al", telegram_al=True, v11_seviye=int(_seviye)
+                        symbol,
+                        "telegram_al",
+                        telegram_al=True,
+                        v11_seviye=int(_seviye),
+                        v11_kontrollu_ust_duzey=bool(_kontrollu_ust_duzey),
                     )
 
                 # Yalnızca gerçekten gönderilen AL'ları +%5 kâr bildirimi ve 3 saatlik rejim öğrenmesi için takip et.
