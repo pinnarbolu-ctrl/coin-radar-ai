@@ -47,6 +47,9 @@ son_ai_kararlar = {}
 
 # Sade birleşik: açık AL takibi
 AL_TAKIP = {}
+# Telegram'a gönderilen 🌱 İZLE mesajları için ayrı +%3 hedef takibi.
+# AL takibiyle karışmaz ve AL/SAT kararı üretmez.
+IZLE_TAKIP = {}
 
 # 5+ Güç Fiyat Teyidi: SADECE görsel/izleme katmanı.
 # AL/BEKLE/SAT kriterlerini, aday filtrelerini veya sıralamayı değiştirmez.
@@ -58,6 +61,8 @@ BES_FIYAT_TEYIT_ARDISIK = 2
 
 POZISYON_TAKIP_SURESI = 15
 KAR_BILDIR_ESIK = 3.0
+IZLE_HEDEF_ESIK = 3.0
+HEDEF_BILDIR_ESIKLERI = (3.0, 6.0, 10.0)
 KAR_KORU_ORAN = 40
 ILK_ZARAR_KES = -0.8
 TEPE_GERI_VERME = -1.4
@@ -70,6 +75,7 @@ _RAILWAY_VOLUME = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
 _AL_DEFAULT_DIR = _RAILWAY_VOLUME if _RAILWAY_VOLUME else ("/data" if os.path.isdir("/data") else ".")
 AL_OGRENME_DOSYA = os.getenv("AL_OGRENME_DOSYA", os.path.join(_AL_DEFAULT_DIR, "al_ogrenme_rejim.json"))
 AL_TAKIP_DOSYA = os.getenv("AL_TAKIP_DOSYA", os.path.join(_AL_DEFAULT_DIR, "v11_al_takip.json"))
+IZLE_TAKIP_DOSYA = os.getenv("IZLE_TAKIP_DOSYA", os.path.join(_AL_DEFAULT_DIR, "v11_izle_hedef_takip.json"))
 AL_OGRENME_SURESI = 3 * 60 * 60
 REJIM_RAPOR_ARALIGI = 24 * 60 * 60
 SON_REJIM_RAPOR_ZAMANI = time.time()
@@ -998,8 +1004,12 @@ def _planli_3gun_rapor_zamani(simdi, meta):
     return son_planli < planli, planli
 
 YUZDE5_RAPOR_ETIKETI = "V11 Erken+Devam"
-V11_RAPOR_BASARI_ESIGI = 5.0
+V11_RAPOR_BASARI_ESIGI = 3.0
 _YUZDE5_META_DOSYA = os.path.join(_AL_DEFAULT_DIR, "yuzde5_basariraporu_v11.json")
+# Süreç her açıldığında içinde bulunduğu rapor dönemini tüketilmiş kabul eder.
+# Diskteki meta eski veya yazılamaz olsa bile bu taban aynı açılışta rapor
+# yağmurunu engeller.
+_YUZDE5_ACILIS_DONEM_TABANI = 0.0
 
 def _yuzde5_meta_yukle():
     try:
@@ -1036,6 +1046,12 @@ def _yuzde5_rapor_donemi_claim_et(simdi):
     # Her çağrıda diski yeniden oku; başka bir süreçte güncellenmiş olabilecek
     # global belleğe güvenme.
     meta = _yuzde5_meta_yukle()
+    disk_son_planli = float(meta.get("son_planli_rapor_ts", 0) or 0)
+    if disk_son_planli < _YUZDE5_ACILIS_DONEM_TABANI:
+        meta["son_planli_rapor_ts"] = _YUZDE5_ACILIS_DONEM_TABANI
+        meta["son_rapor"] = _YUZDE5_ACILIS_DONEM_TABANI
+        meta["rapor_durum"] = "acilista_mevcut_donem_atlandi"
+        _yuzde5_meta_kaydet(meta)
     gonder, planli_ts = _planli_3gun_rapor_zamani(simdi, meta)
     if not gonder:
         _YUZDE5_META = meta
@@ -1103,23 +1119,26 @@ if not _YUZDE5_META.get("baslangic"):
     _YUZDE5_META["son_rapor"] = _yuzde5_acilis_ts
     _yuzde5_meta_degisti = True
 
-# Railway yeniden başladığında meta/Volume bulunamazsa geçmişte kalmış mevcut
-# 72 saatlik dönemi hemen Telegram'a yollama. Onu açılışta tüketilmiş say ve
-# yalnız bir sonraki gerçek 3 günlük sınırda rapor üret. Bu koruma deploy veya
-# çökme döngüsünün aynı raporu art arda göndermesini engeller.
-if (
-    not _YUZDE5_META.get("son_planli_rapor_ts")
-    and _yuzde5_acilis_ts >= ILK_3GUN_RAPOR_TS
-):
+# Railway her yeniden başladığında mevcut 72 saatlik dönemi koşulsuz olarak
+# tüketilmiş say. Meta eski olsa, Volume bağlı olmasa veya kayıt yazılamasa bile
+# bu süreç açılışta rapor göndermez. Yalnız süreç çalışırken bir sonraki 72
+# saatlik sınıra geçilirse yeni rapor üretir.
+if _yuzde5_acilis_ts >= ILK_3GUN_RAPOR_TS:
     _idx = int(
         (_yuzde5_acilis_ts - ILK_3GUN_RAPOR_TS) // YUZDE5_RAPOR_ARALIGI
     )
     _acilistaki_planli_ts = (
         ILK_3GUN_RAPOR_TS + _idx * YUZDE5_RAPOR_ARALIGI
     )
-    _YUZDE5_META["son_planli_rapor_ts"] = _acilistaki_planli_ts
-    _YUZDE5_META["son_rapor"] = _acilistaki_planli_ts
-    _YUZDE5_META["rapor_durum"] = "acilista_gecmis_donem_atlandi"
+    _YUZDE5_ACILIS_DONEM_TABANI = _acilistaki_planli_ts
+    _onceki_planli_ts = float(
+        _YUZDE5_META.get("son_planli_rapor_ts", 0) or 0
+    )
+    _YUZDE5_META["son_planli_rapor_ts"] = max(
+        _onceki_planli_ts, _YUZDE5_ACILIS_DONEM_TABANI
+    )
+    _YUZDE5_META["son_rapor"] = _YUZDE5_META["son_planli_rapor_ts"]
+    _YUZDE5_META["rapor_durum"] = "acilista_mevcut_donem_atlandi"
     _YUZDE5_META["rapor_acilis_koruma_ts"] = _yuzde5_acilis_ts
     _yuzde5_meta_degisti = True
 
@@ -1906,7 +1925,6 @@ def _al_takip_yukle():
                     for symbol, kayit in veri.items()
                     if isinstance(kayit, dict)
                     and kayit.get("aktif")
-                    and not kayit.get("kar_bildirildi")
                     and float(kayit.get("giris", 0) or 0) > 0
                 }
     except Exception as e:
@@ -1928,6 +1946,160 @@ def _al_takip_kaydet():
         print("AL takip dosyası yazılamadı:", e)
 
 
+def _izle_takip_yukle():
+    """Deploy/restart sonrasında açık 🌱 İZLE +%3 takiplerini geri yükler."""
+    try:
+        if os.path.exists(IZLE_TAKIP_DOSYA):
+            with open(IZLE_TAKIP_DOSYA, "r", encoding="utf-8") as f:
+                veri = json.load(f)
+            if isinstance(veri, dict):
+                return {
+                    str(symbol): kayit
+                    for symbol, kayit in veri.items()
+                    if isinstance(kayit, dict)
+                    and kayit.get("aktif")
+                    and float(kayit.get("giris", 0) or 0) > 0
+                }
+    except Exception as e:
+        print("İZLE hedef takip dosyası okunamadı:", e)
+    return {}
+
+
+def _izle_takip_kaydet():
+    try:
+        klasor = os.path.dirname(os.path.abspath(IZLE_TAKIP_DOSYA))
+        if klasor:
+            os.makedirs(klasor, exist_ok=True)
+        gecici = f"{IZLE_TAKIP_DOSYA}.{os.getpid()}.tmp"
+        with open(gecici, "w", encoding="utf-8") as f:
+            json.dump(IZLE_TAKIP, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(gecici, IZLE_TAKIP_DOSYA)
+    except Exception as e:
+        print("İZLE hedef takip dosyası yazılamadı:", e)
+
+
+def izle_takip_baslat(aday):
+    """Telegram'a çıkan 🌱 İZLE mesajını üç saat boyunca +%3 için takip eder."""
+    symbol = str(aday.get("symbol", "") or "")
+    fiyat = float(aday.get("fiyat", 0) or 0)
+    if not symbol or fiyat <= 0:
+        return
+
+    mevcut = IZLE_TAKIP.get(symbol)
+    if mevcut and mevcut.get("aktif"):
+        return
+
+    IZLE_TAKIP[symbol] = {
+        "aktif": True,
+        "giris": fiyat,
+        "hedef_bildirildi": False,
+        "bildirilen_esikler": [],
+        "baslangic_zamani": time.time(),
+    }
+    _izle_takip_kaydet()
+
+
+def _izle_hedef_ogrenmede_isaretle(symbol, baslangic_zamani, esik):
+    """Aynı İZLE hedefini deploy sonrasında yeniden bildirmeyi engeller."""
+    for k in reversed(AL_OGRENME_KAYITLARI):
+        if (
+            str(k.get("symbol", "")) == str(symbol)
+            and str(k.get("kayit_tipi", "")) == "v11_erken_izle"
+            and abs(float(k.get("zaman", 0) or 0) - float(baslangic_zamani or 0)) <= 120
+        ):
+            k[f"izle_hedef{int(esik)}_bildirildi"] = True
+            _al_ogrenme_kaydet()
+            return
+
+
+def _izle_takip_ogrenmeden_tamamla():
+    """Takip dosyası yoksa açık gerçek Telegram İZLE kayıtlarından onarır."""
+    simdi = time.time()
+    degisti = False
+    for k in AL_OGRENME_KAYITLARI:
+        if (
+            str(k.get("kayit_tipi", "")) != "v11_erken_izle"
+            or k.get("tamamlandi")
+            or k.get("izle_hedef10_bildirildi")
+        ):
+            continue
+        zaman = float(k.get("zaman", 0) or 0)
+        if simdi - zaman >= AL_OGRENME_SURESI:
+            continue
+        symbol = str(k.get("symbol", "") or "")
+        giris = float(k.get("giris", 0) or 0)
+        mevcut = IZLE_TAKIP.get(symbol)
+        if not symbol or giris <= 0 or (mevcut and mevcut.get("aktif")):
+            continue
+        IZLE_TAKIP[symbol] = {
+            "aktif": True,
+            "giris": giris,
+            "hedef_bildirildi": False,
+            "bildirilen_esikler": [
+                esik for esik in HEDEF_BILDIR_ESIKLERI
+                if k.get(f"izle_hedef{int(esik)}_bildirildi")
+                or (esik == 3.0 and k.get("izle_hedef5_bildirildi"))
+            ],
+            "baslangic_zamani": zaman,
+        }
+        degisti = True
+    if degisti:
+        _izle_takip_kaydet()
+
+
+def izle_takip_guncelle(fiyatlar):
+    """🌱 İZLE fiyatından +%3/+%6/+%10 görülünce basamak mesajı yollar."""
+    simdi = time.time()
+    degisti = False
+    for symbol, p in IZLE_TAKIP.items():
+        if not p.get("aktif"):
+            continue
+
+        baslangic = float(p.get("baslangic_zamani", simdi) or simdi)
+        if simdi - baslangic >= AL_OGRENME_SURESI:
+            p["aktif"] = False
+            degisti = True
+            continue
+
+        fiyat = float(fiyatlar.get(symbol, 0) or 0)
+        giris = float(p.get("giris", 0) or 0)
+        if fiyat <= 0 or giris <= 0:
+            continue
+        getiri = _pct(fiyat, giris)
+        gorunen = symbol[:-3] if symbol.endswith("TRY") else symbol
+        bildirilen = {
+            float(x) for x in (p.get("bildirilen_esikler") or [])
+        }
+        for esik in HEDEF_BILDIR_ESIKLERI:
+            if getiri < esik or esik in bildirilen:
+                continue
+            mesaj = (
+                f"🎯 İZLE +%{esik:g} HEDEF GÖRÜLDÜ - {kalin_coin_yazisi(gorunen)}\n"
+                f"İlk İZLE: {giris:.4f} | Güncel: {fiyat:.4f}\n"
+                f"Getiri: %{getiri:+.2f}\n"
+                "Not: AL/SAT emri değil; İZLE adayının hedef sonucudur."
+            )
+            print(mesaj)
+            if not telegram_gonder(mesaj):
+                print(
+                    symbol,
+                    f"İZLE +%{esik:g} mesajı gönderilemedi; sonraki kontrolde tekrar denenecek.",
+                )
+                break
+            bildirilen.add(esik)
+            p["bildirilen_esikler"] = sorted(bildirilen)
+            p["hedef_bildirildi"] = True
+            _izle_hedef_ogrenmede_isaretle(symbol, baslangic, esik)
+            degisti = True
+            if esik >= max(HEDEF_BILDIR_ESIKLERI):
+                p["aktif"] = False
+
+    if degisti:
+        _izle_takip_kaydet()
+
+
 def _al_takip_ogrenmeden_tamamla():
     """Takip dosyası yoksa son 3 saatteki gerçek Telegram AL kayıtlarından onarır."""
     simdi = time.time()
@@ -1945,6 +2117,7 @@ def _al_takip_ogrenmeden_tamamla():
             "aktif": True,
             "giris": giris,
             "kar_bildirildi": False,
+            "bildirilen_esikler": [],
             "sinyal_event_id": k.get("sinyal_event_id"),
             "baslangic_zamani": float(k.get("zaman", simdi) or simdi),
         }
@@ -1968,6 +2141,7 @@ def al_takip_baslat(aday):
         "aktif": True,
         "giris": fiyat,
         "kar_bildirildi": False,
+        "bildirilen_esikler": [],
         "sinyal_event_id": aday.get("_sinyal_event_id"),
         "baslangic_zamani": time.time(),
     }
@@ -1977,9 +2151,9 @@ def al_takip_baslat(aday):
 def al_takip_guncelle(ticker):
     """
     Otomatik SAT/ÇIK yok.
-    Sadece ilk AL fiyatına göre +%3 görülünce tek seferlik ara kâr mesajı yollar.
+    İlk AL fiyatına göre +%3/+%6/+%10 basamaklarını tek tek bildirir.
     """
-    if not AL_TAKIP:
+    if not AL_TAKIP and not IZLE_TAKIP:
         return
 
     fiyatlar = {}
@@ -1995,8 +2169,16 @@ def al_takip_guncelle(ticker):
     # Aynı 15 sn fiyat akışıyla 90+ profil sonrası gerçek fiyat devamını da kontrol et.
     bes_fiyat_teyit_guncelle(fiyatlar)
 
+    al_takip_degisti = False
+    simdi = time.time()
     for symbol, p in AL_TAKIP.items():
-        if not p.get("aktif") or p.get("kar_bildirildi"):
+        if not p.get("aktif"):
+            continue
+
+        baslangic = float(p.get("baslangic_zamani", simdi) or simdi)
+        if simdi - baslangic >= AL_OGRENME_SURESI:
+            p["aktif"] = False
+            al_takip_degisti = True
             continue
 
         fiyat = fiyatlar.get(symbol)
@@ -2006,20 +2188,42 @@ def al_takip_guncelle(ticker):
         giris = float(p.get("giris", fiyat))
         getiri = _pct(fiyat, giris)
 
-        if getiri >= KAR_BILDIR_ESIK:
+        bildirilen = {
+            float(x) for x in (p.get("bildirilen_esikler") or [])
+        }
+        for esik in HEDEF_BILDIR_ESIKLERI:
+            if getiri < esik or esik in bildirilen:
+                continue
+            if esik == 3.0:
+                baslik = "💰 +%3 KÂR BÖLGESİ"
+            elif esik == 6.0:
+                baslik = "🚀 +%6 GÜÇLÜ DEVAM"
+            else:
+                baslik = "🔥 +%10 BÜYÜK HAREKET"
             mesaj = (
-                f"💰 +%3 KÂR BÖLGESİ - {kalin_coin_yazisi(symbol[:-3] if symbol.endswith('TRY') else symbol)}\n"
+                f"{baslik} - {kalin_coin_yazisi(symbol[:-3] if symbol.endswith('TRY') else symbol)}\n"
                 f"İlk AL: {giris:.4f} | Güncel: {fiyat:.4f}\n"
                 f"Getiri: %{getiri:+.2f}\n"
-                f"Not: Çık emri değil; kârı değerlendirmek / çıkışa hazırlanmak için ara uyarı."
+                "Not: Çık emri değil; hareket basamağı bilgilendirmesidir."
             )
             print(mesaj)
-            if telegram_gonder(mesaj):
-                p["kar_bildirildi"] = True
+            if not telegram_gonder(mesaj):
+                print(
+                    symbol,
+                    f"+%{esik:g} mesajı gönderilemedi; sonraki 15 sn kontrolde tekrar denenecek.",
+                )
+                break
+            bildirilen.add(esik)
+            p["bildirilen_esikler"] = sorted(bildirilen)
+            p["kar_bildirildi"] = True
+            al_takip_degisti = True
+            if esik >= max(HEDEF_BILDIR_ESIKLERI):
                 p["aktif"] = False
-                _al_takip_kaydet()
-            else:
-                print(symbol, "+%3 mesajı gönderilemedi; sonraki 15 sn kontrolde tekrar denenecek.")
+
+    if al_takip_degisti:
+        _al_takip_kaydet()
+
+    izle_takip_guncelle(fiyatlar)
 
     # Aynı 15 sn ticker akışı AL öğrenmesini de günceller; ekstra API isteği oluşturmaz.
     al_ogrenme_guncelle(ticker)
@@ -3182,6 +3386,8 @@ TOP10_GOLGE_KAYITLARI = _top10_golge_yukle()
 GIRIS_ZAMANI_DENEY_KAYITLARI = _giris_deneyi_yukle()
 AL_TAKIP.update(_al_takip_yukle())
 _al_takip_ogrenmeden_tamamla()
+IZLE_TAKIP.update(_izle_takip_yukle())
+_izle_takip_ogrenmeden_tamamla()
 
 
 STABLE_COINLER = [
@@ -5606,10 +5812,12 @@ while True:
                     # Telegram'da yalnız erken Üst Düzey/Güçlü/İzle sınıfları
                     # sade tek başlıkla gösterilir.
                     print(mesaj)
-                    telegram_gonder(mesaj)
+                    _mesaj_gonderildi = telegram_gonder(mesaj)
                     if _seviye == 3:
                         # Erken fakat kalite puanları henüz yeterli değil.
                         # Görünür izleme mesajıdır; canlı AL ve gerçek emir değildir.
+                        if _mesaj_gonderildi:
+                            izle_takip_baslat(a)
                         erken_izleler.append(a)
                         giris_zamani_deneyi_baslat(a)
                         top10_golge_asama_guncelle(
@@ -5669,7 +5877,7 @@ while True:
             time.sleep(sure)
             beklenen += sure
 
-            if AL_TAKIP or giris_zamani_deneyi_aktif_mi() or top10_hizli_aktif_mi():
+            if AL_TAKIP or IZLE_TAKIP or giris_zamani_deneyi_aktif_mi() or top10_hizli_aktif_mi():
                 try:
                     r = requests.get("https://api.btcturk.com/api/v2/ticker", timeout=10)
                     r.raise_for_status()
