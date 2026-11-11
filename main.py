@@ -57,7 +57,7 @@ BES_FIYAT_TEYIT_TUTUNMA = 0.35
 BES_FIYAT_TEYIT_ARDISIK = 2
 
 POZISYON_TAKIP_SURESI = 15
-KAR_BILDIR_ESIK = 5.0
+KAR_BILDIR_ESIK = 3.0
 KAR_KORU_ORAN = 40
 ILK_ZARAR_KES = -0.8
 TEPE_GERI_VERME = -1.4
@@ -998,6 +998,7 @@ def _planli_3gun_rapor_zamani(simdi, meta):
     return son_planli < planli, planli
 
 YUZDE5_RAPOR_ETIKETI = "V11 Erken+Devam"
+V11_RAPOR_BASARI_ESIGI = 5.0
 _YUZDE5_META_DOSYA = os.path.join(_AL_DEFAULT_DIR, "yuzde5_basariraporu_v11.json")
 
 def _yuzde5_meta_yukle():
@@ -1013,15 +1014,116 @@ def _yuzde5_meta_yukle():
 def _yuzde5_meta_kaydet(meta):
     try:
         os.makedirs(os.path.dirname(_YUZDE5_META_DOSYA), exist_ok=True)
-        with open(_YUZDE5_META_DOSYA, "w", encoding="utf-8") as f:
+        gecici_dosya = f"{_YUZDE5_META_DOSYA}.{os.getpid()}.tmp"
+        with open(gecici_dosya, "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(gecici_dosya, _YUZDE5_META_DOSYA)
     except Exception as e:
         print("+%5 rapor meta yazılamadı:", e)
 
+def _yuzde5_rapor_donemi_claim_et(simdi):
+    """Aynı 72 saatlik rapor dönemini yalnız bir süreç sahiplenebilir.
+
+    Claim dosyası O_EXCL ile atomik oluşturulur. Böylece aynı Python sürecindeki
+    tekrar çağrılar kadar, aynı kalıcı diski kullanan birden fazla Railway
+    süreci de aynı raporu yeniden gönderemez. Dönem ilk Telegram mesajından
+    önce kaydedilir; kısmi ağ hatası rapor fırtınasına dönüşmez.
+    """
+    global _YUZDE5_META
+
+    # Her çağrıda diski yeniden oku; başka bir süreçte güncellenmiş olabilecek
+    # global belleğe güvenme.
+    meta = _yuzde5_meta_yukle()
+    gonder, planli_ts = _planli_3gun_rapor_zamani(simdi, meta)
+    if not gonder:
+        _YUZDE5_META = meta
+        return None
+
+    os.makedirs(os.path.dirname(_YUZDE5_META_DOSYA), exist_ok=True)
+    claim_dosyasi = f"{_YUZDE5_META_DOSYA}.{int(planli_ts)}.claim"
+    try:
+        fd = os.open(claim_dosyasi, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        print(f"+%5 rapor tekrar engellendi: dönem={int(planli_ts)}")
+        return None
+    except Exception as e:
+        # Kilit alınamıyorsa güvenli davran: raporu tekrar tekrar göndermektense
+        # bu turu pas geç.
+        print("+%5 rapor dönem kilidi alınamadı:", e)
+        return None
+
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "planli_ts": planli_ts,
+                    "claim_ts": simdi,
+                    "pid": os.getpid(),
+                },
+                f,
+                ensure_ascii=False,
+            )
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception as e:
+        print("+%5 rapor dönem kilidi yazılamadı:", e)
+        return None
+
+    # Gönderim tamamlanmasını beklemeden dönemi tüket. Bu at-most-once davranış,
+    # ilk mesaj gidip süreç yeniden başlarsa aynı raporun yeniden yağmasını önler.
+    meta["son_rapor"] = planli_ts
+    meta["son_planli_rapor_ts"] = planli_ts
+    meta["rapor_durum"] = "gonderiliyor"
+    meta["rapor_claim_ts"] = simdi
+    meta["rapor_claim_pid"] = os.getpid()
+    _yuzde5_meta_kaydet(meta)
+    _YUZDE5_META = meta
+    return planli_ts
+
+def _yuzde5_rapor_durumunu_kaydet(planli_ts, gonderim_sonuclari):
+    global _YUZDE5_META
+    meta = _yuzde5_meta_yukle()
+    if float(meta.get("son_planli_rapor_ts", 0) or 0) != float(planli_ts):
+        return
+    meta["rapor_durum"] = (
+        "tamamlandi" if all(gonderim_sonuclari) else "kismi_veya_hata"
+    )
+    meta["rapor_tamamlanma_ts"] = time.time()
+    meta["rapor_mesaj_sonuclari"] = [bool(x) for x in gonderim_sonuclari]
+    _yuzde5_meta_kaydet(meta)
+    _YUZDE5_META = meta
+
 _YUZDE5_META = _yuzde5_meta_yukle()
+_yuzde5_meta_degisti = False
+_yuzde5_acilis_ts = time.time()
 if not _YUZDE5_META.get("baslangic"):
-    _YUZDE5_META["baslangic"] = time.time()
-    _YUZDE5_META["son_rapor"] = _YUZDE5_META["baslangic"]
+    _YUZDE5_META["baslangic"] = _yuzde5_acilis_ts
+    _YUZDE5_META["son_rapor"] = _yuzde5_acilis_ts
+    _yuzde5_meta_degisti = True
+
+# Railway yeniden başladığında meta/Volume bulunamazsa geçmişte kalmış mevcut
+# 72 saatlik dönemi hemen Telegram'a yollama. Onu açılışta tüketilmiş say ve
+# yalnız bir sonraki gerçek 3 günlük sınırda rapor üret. Bu koruma deploy veya
+# çökme döngüsünün aynı raporu art arda göndermesini engeller.
+if (
+    not _YUZDE5_META.get("son_planli_rapor_ts")
+    and _yuzde5_acilis_ts >= ILK_3GUN_RAPOR_TS
+):
+    _idx = int(
+        (_yuzde5_acilis_ts - ILK_3GUN_RAPOR_TS) // YUZDE5_RAPOR_ARALIGI
+    )
+    _acilistaki_planli_ts = (
+        ILK_3GUN_RAPOR_TS + _idx * YUZDE5_RAPOR_ARALIGI
+    )
+    _YUZDE5_META["son_planli_rapor_ts"] = _acilistaki_planli_ts
+    _YUZDE5_META["son_rapor"] = _acilistaki_planli_ts
+    _YUZDE5_META["rapor_durum"] = "acilista_gecmis_donem_atlandi"
+    _YUZDE5_META["rapor_acilis_koruma_ts"] = _yuzde5_acilis_ts
+    _yuzde5_meta_degisti = True
+
+if _yuzde5_meta_degisti:
     _yuzde5_meta_kaydet(_YUZDE5_META)
 
 def yuzde5_basariraporu_gerekirse_gonder():
@@ -1029,8 +1131,8 @@ def yuzde5_basariraporu_gerekirse_gonder():
     global _YUZDE5_META
 
     simdi = time.time()
-    gonder, planli_ts = _planli_3gun_rapor_zamani(simdi, _YUZDE5_META)
-    if not gonder:
+    planli_ts = _yuzde5_rapor_donemi_claim_et(simdi)
+    if planli_ts is None:
         return
 
     pencere_bas = planli_ts - YUZDE5_RAPOR_ARALIGI
@@ -1050,10 +1152,13 @@ def yuzde5_basariraporu_gerekirse_gonder():
     ]
     tamam = [x for x in canli_tum if x.get("tamamlandi")]
     acik = [x for x in canli_tum if not x.get("tamamlandi")]
-    basarili = [x for x in tamam if float(x.get("max_getiri", 0) or 0) >= 5.0]
+    basarili = [
+        x for x in tamam
+        if float(x.get("max_getiri", 0) or 0) >= V11_RAPOR_BASARI_ESIGI
+    ]
     yanlis = [
         x for x in tamam
-        if float(x.get("max_getiri", 0) or 0) < 5.0
+        if float(x.get("max_getiri", 0) or 0) < V11_RAPOR_BASARI_ESIGI
         and float(x.get("min_getiri", 0) or 0) <= -2.5
     ]
     notr = [x for x in tamam if x not in basarili and x not in yanlis]
@@ -1081,7 +1186,7 @@ def yuzde5_basariraporu_gerekirse_gonder():
         return (
             sum(
                 1 for x in grup
-                if float(x.get("max_getiri", 0) or 0) < 5.0
+                if float(x.get("max_getiri", 0) or 0) < V11_RAPOR_BASARI_ESIGI
                 and float(x.get("min_getiri", 0) or 0) <= -2.5
             ) / len(grup) * 100.0
         ) if grup else 0.0
@@ -1236,37 +1341,34 @@ def yuzde5_basariraporu_gerekirse_gonder():
     )
 
     mesaj = (
-        f"📊 3 GÜNLÜK +%5 / YANLIŞ SİNYAL RAPORU — {YUZDE5_RAPOR_ETIKETI}\n\n"
+        f"📊 3 GÜNLÜK +%{V11_RAPOR_BASARI_ESIGI:g} / YANLIŞ SİNYAL RAPORU — {YUZDE5_RAPOR_ETIKETI}\n\n"
         f"Tamamlanan sinyal: {len(tamam)}\n"
-        f"✅ +%5 yapan: {len(basarili)}\n"
+        f"✅ +%{V11_RAPOR_BASARI_ESIGI:g} yapan: {len(basarili)}\n"
         f"❌ Yanlış sinyal (-%2.5): {len(yanlis)}\n"
         f"➖ Nötr/yetersiz: {len(notr)}\n"
-        f"🎯 Ham +%5 başarı: %{ham_oran:.1f}\n"
+        f"🎯 Ham +%{V11_RAPOR_BASARI_ESIGI:g} başarı: %{ham_oran:.1f}\n"
         f"⚠️ Yanlış sinyal oranı: %{yanlis_oran:.1f}\n"
         f"🧠 Net sinyal kalitesi: %{net_kalite:.1f}\n"
         f"📈 Ortalama tepe getiri: %{ort_tepe:+.2f}\n"
         f"📉 Ortalama dip getiri: %{ort_dip:+.2f}\n"
         f"⏳ Henüz tamamlanmayan: {len(acik)}"
         f"{filtre_metni}\n\n"
-        f"Not: Başarı = AL sonrası 3 saat içinde en az +%5 tepe. "
-        f"Yanlış = +%5 görmeden en az -%2.5 ters hareket."
+        f"Not: Başarı = AL sonrası 3 saat içinde en az +%{V11_RAPOR_BASARI_ESIGI:g} tepe. "
+        f"Yanlış = +%{V11_RAPOR_BASARI_ESIGI:g} görmeden en az -%2.5 ters hareket."
     )
     print(mesaj)
-    telegram_gonder(mesaj)
+    rapor_gonderimleri = [telegram_gonder(mesaj)]
 
     # Telegram'ın tek mesaj sınırını zorlamamak için aynı raporun Top10 keşif
     # bölümü hemen arkasından ayrı mesaj olarak gider.
     top10_raporu = top10_kacan_hareket_raporu(pencere_bas, pencere_son)
     print(top10_raporu)
-    telegram_gonder(top10_raporu)
+    rapor_gonderimleri.append(telegram_gonder(top10_raporu))
 
     giris_raporu = giris_zamani_deneyi_raporu(pencere_bas, pencere_son)
     print(giris_raporu)
-    telegram_gonder(giris_raporu)
-
-    _YUZDE5_META["son_rapor"] = planli_ts
-    _YUZDE5_META["son_planli_rapor_ts"] = planli_ts
-    _yuzde5_meta_kaydet(_YUZDE5_META)
+    rapor_gonderimleri.append(telegram_gonder(giris_raporu))
+    _yuzde5_rapor_durumunu_kaydet(planli_ts, rapor_gonderimleri)
 
 
 _PIYASA_DEVAM_HAFIZA = []
@@ -1793,7 +1895,7 @@ def bes_fiyat_teyit_guncelle(fiyatlar):
 
 
 def _al_takip_yukle():
-    """Deploy/restart sonrasında açık +%5 takiplerini Railway Volume'dan geri yükler."""
+    """Deploy/restart sonrasında açık +%3 takiplerini Railway Volume'dan geri yükler."""
     try:
         if os.path.exists(AL_TAKIP_DOSYA):
             with open(AL_TAKIP_DOSYA, "r", encoding="utf-8") as f:
@@ -1813,7 +1915,7 @@ def _al_takip_yukle():
 
 
 def _al_takip_kaydet():
-    """Açık +%5 takiplerini atomik yazar; yarım JSON ile takip kaybını önler."""
+    """Açık +%3 takiplerini atomik yazar; yarım JSON ile takip kaybını önler."""
     try:
         klasor = os.path.dirname(os.path.abspath(AL_TAKIP_DOSYA))
         if klasor:
@@ -1852,7 +1954,7 @@ def _al_takip_ogrenmeden_tamamla():
 
 
 def al_takip_baslat(aday):
-    """Gerçek AL mesajı gönderilen coini yalnızca +%5 kâr bildirimi için takip eder."""
+    """Gerçek AL mesajı gönderilen coini yalnızca +%3 kâr bildirimi için takip eder."""
     symbol = aday.get("symbol")
     fiyat = float(aday.get("fiyat", 0) or 0)
     if not symbol or fiyat <= 0:
@@ -1875,7 +1977,7 @@ def al_takip_baslat(aday):
 def al_takip_guncelle(ticker):
     """
     Otomatik SAT/ÇIK yok.
-    Sadece ilk AL fiyatına göre +%5 görülünce tek seferlik ara kâr mesajı yollar.
+    Sadece ilk AL fiyatına göre +%3 görülünce tek seferlik ara kâr mesajı yollar.
     """
     if not AL_TAKIP:
         return
@@ -1906,7 +2008,7 @@ def al_takip_guncelle(ticker):
 
         if getiri >= KAR_BILDIR_ESIK:
             mesaj = (
-                f"💰 +%5 KÂR BÖLGESİ - {kalin_coin_yazisi(symbol[:-3] if symbol.endswith('TRY') else symbol)}\n"
+                f"💰 +%3 KÂR BÖLGESİ - {kalin_coin_yazisi(symbol[:-3] if symbol.endswith('TRY') else symbol)}\n"
                 f"İlk AL: {giris:.4f} | Güncel: {fiyat:.4f}\n"
                 f"Getiri: %{getiri:+.2f}\n"
                 f"Not: Çık emri değil; kârı değerlendirmek / çıkışa hazırlanmak için ara uyarı."
@@ -1915,10 +2017,9 @@ def al_takip_guncelle(ticker):
             if telegram_gonder(mesaj):
                 p["kar_bildirildi"] = True
                 p["aktif"] = False
-                _sinyal_sira_hit5_isaretle(symbol, p.get("sinyal_event_id"))
                 _al_takip_kaydet()
             else:
-                print(symbol, "+%5 mesajı gönderilemedi; sonraki 15 sn kontrolde tekrar denenecek.")
+                print(symbol, "+%3 mesajı gönderilemedi; sonraki 15 sn kontrolde tekrar denenecek.")
 
     # Aynı 15 sn ticker akışı AL öğrenmesini de günceller; ekstra API isteği oluşturmaz.
     al_ogrenme_guncelle(ticker)
@@ -2059,6 +2160,10 @@ def al_ogrenme_baslat(
         "v11_gec_teyit_nedenleri": list(aday.get("v11_gec_teyit_nedenleri", [])),
         "v11_seviye": int(aday.get("v11_seviye", 0) or 0),
         "v11_kontrollu_ust_duzey": bool(aday.get("v11_kontrollu_ust_duzey")),
+        # +%3 Telegram uyarısından bağımsız olarak gerçek +%5 görülmesini
+        # arka planda koru; tekrar mesajındaki "Önceki +%5" etiketi doğru kalsın.
+        "sinyal_event_id": aday.get("_sinyal_event_id"),
+        "sinyal_sira_hit5_isaretlendi": False,
     }
     AL_OGRENME_KAYITLARI.append(kayit)
     _al_ogrenme_kaydet()
@@ -2090,6 +2195,13 @@ def al_ogrenme_guncelle(ticker):
             getiri = _pct(fiyat, giris)
             k["max_getiri"] = round(max(float(k.get("max_getiri", 0) or 0), getiri), 3)
             k["min_getiri"] = round(min(float(k.get("min_getiri", 0) or 0), getiri), 3)
+            if (
+                str(k.get("kayit_tipi", "telegram")) == "telegram"
+                and float(k.get("max_getiri", 0) or 0) >= 5.0
+                and not k.get("sinyal_sira_hit5_isaretlendi")
+            ):
+                _sinyal_sira_hit5_isaretle(symbol, k.get("sinyal_event_id"))
+                k["sinyal_sira_hit5_isaretlendi"] = True
             degisti = True
 
         if simdi - float(k.get("zaman", simdi)) < AL_OGRENME_SURESI:
@@ -5517,7 +5629,7 @@ while True:
                         v11_kontrollu_ust_duzey=bool(_kontrollu_ust_duzey),
                     )
 
-                # Yalnızca gerçekten gönderilen AL'ları +%5 kâr bildirimi ve 3 saatlik rejim öğrenmesi için takip et.
+                # Yalnızca gerçekten gönderilen AL'ları +%3 kâr bildirimi ve 3 saatlik rejim öğrenmesi için takip et.
                 for _a in gonderilenler:
                     al_takip_baslat(_a)
                     al_ogrenme_baslat(_a, btc_d, piyasa_fiyatlari, piyasa_medyan3, btc_giris_fiyati)
