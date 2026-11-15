@@ -30,6 +30,21 @@ son_fiyatlar = {}
 tarama_sayaci = 0
 SON_PIYASA_MEDYAN_60 = 0.0  # Son tam taramadaki TRY coinleri 60dk medyanı
 
+# Ani Hareket Erken Aday V1
+# Ana V11 taramasını/AL kararını değiştirmez. Ticker'ı 10 saniyede bir izleyerek
+# 1 dakikalık mum kapanmadan, hareket henüz %1.35'i geçmemişken yalnız erken
+# uyarı üretir. Aynı coin 30 dakika içinde tekrar konuşmaz.
+ANI_ERKEN_TARAMA_SURESI = 10
+ANI_ERKEN_GECMIS_SURESI = 75
+ANI_ERKEN_MIN_HAREKET = 0.20
+ANI_ERKEN_HIZLI_MIN = 0.30
+ANI_ERKEN_MAX_HAREKET = 1.35
+ANI_ERKEN_MIN_REL = 0.15
+ANI_ERKEN_MAX_SPREAD = 0.60
+ANI_ERKEN_SOGUMA = 30 * 60
+ANI_ERKEN_GECMIS = {}
+ANI_ERKEN_SON_MESAJ = {}
+
 # Early Capture V1: önceki taramadaki hızlanmayı ölçmek için hafıza.
 onceki_tarama = {}
 
@@ -60,7 +75,7 @@ BES_FIYAT_TEYIT_HEDEF = 0.50
 BES_FIYAT_TEYIT_TUTUNMA = 0.35
 BES_FIYAT_TEYIT_ARDISIK = 2
 
-POZISYON_TAKIP_SURESI = 15
+POZISYON_TAKIP_SURESI = ANI_ERKEN_TARAMA_SURESI
 KAR_BILDIR_ESIK = 3.0
 IZLE_HEDEF_ESIK = 3.0
 HEDEF_BILDIR_ESIKLERI = (3.0, 6.0, 10.0)
@@ -2027,6 +2042,7 @@ def izle_takip_baslat(aday):
         "bildirilen_esikler": [],
         "baslangic_zamani": time.time(),
         "kontrollu_erken_al": bool(aday.get("v11_kontrollu_erken_al")),
+        "kaynak": str(aday.get("izle_kaynak", "") or ""),
     }
     _izle_takip_kaydet()
 
@@ -2107,7 +2123,9 @@ def izle_takip_guncelle(fiyatlar):
             if getiri < esik or esik in bildirilen:
                 continue
             kontrollu = bool(p.get("kontrollu_erken_al"))
-            kaynak = "KONTROLLÜ ERKEN" if kontrollu else "İZLE"
+            kaynak = str(p.get("kaynak", "") or "")
+            if not kaynak:
+                kaynak = "KONTROLLÜ ERKEN" if kontrollu else "İZLE"
             mesaj = (
                 f"🎯 {kaynak} +%{esik:g} HEDEF GÖRÜLDÜ - {kalin_coin_yazisi(gorunen)}\n"
                 f"Başlangıç: {giris:.4f} | Güncel: {fiyat:.4f}\n"
@@ -4260,8 +4278,193 @@ def v11_tekrar_mesaji_uygun(aday):
     return True, ""
 
 
+def _ani_sayi(deger, varsayilan=0.0):
+    try:
+        return float(deger if deger is not None else varsayilan)
+    except (TypeError, ValueError):
+        return float(varsayilan)
+
+
+def _ani_fiyat_yaz(fiyat):
+    if fiyat >= 100:
+        return f"{fiyat:.2f}"
+    if fiyat >= 1:
+        return f"{fiyat:.4f}"
+    return f"{fiyat:.8f}".rstrip("0").rstrip(".")
+
+
+def ani_hareket_erken_guncelle(ticker):
+    """10 sn ticker akışından, %3 hedefinden önce mikro hızlanmayı bildirir.
+
+    Bu katman V11 AL/İZLE kararını değiştirmez. Bir dakikalık mum kapanışını
+    beklemez; fiyat ivmesi, BTC/piyasa ayrışması, spread ve varsa hacim akışını
+    birlikte kullanır. Hareket %1.35'i geçtiyse artık erken sayılmaz.
+    """
+    simdi = time.time()
+    coin_haritasi = {}
+
+    for coin in ticker:
+        symbol = str(coin.get("pair", "") or "")
+        if (
+            not symbol.endswith("TRY")
+            or symbol == "BTCTRY"
+            or stable_coin_mi(symbol)
+            or len(symbol) > 15
+        ):
+            continue
+        fiyat = _ani_sayi(coin.get("last"))
+        if fiyat <= 0:
+            continue
+        hacim = _ani_sayi(coin.get("volume"))
+        coin_haritasi[symbol] = coin
+        gecmis = ANI_ERKEN_GECMIS.setdefault(symbol, [])
+        gecmis.append({"ts": simdi, "fiyat": fiyat, "hacim": hacim})
+        ANI_ERKEN_GECMIS[symbol] = [
+            x for x in gecmis
+            if simdi - float(x.get("ts", 0) or 0) <= ANI_ERKEN_GECMIS_SURESI
+        ][-8:]
+
+    # BTC aynı 10 saniyelik kıyas için ayrıca tutulur; aday havuzuna girmez.
+    btc_coin = next((x for x in ticker if x.get("pair") == "BTCTRY"), None)
+    if btc_coin:
+        btc_fiyat = _ani_sayi(btc_coin.get("last"))
+        if btc_fiyat > 0:
+            btc_gecmis = ANI_ERKEN_GECMIS.setdefault("BTCTRY", [])
+            btc_gecmis.append({"ts": simdi, "fiyat": btc_fiyat, "hacim": 0.0})
+            ANI_ERKEN_GECMIS["BTCTRY"] = [
+                x for x in btc_gecmis
+                if simdi - float(x.get("ts", 0) or 0) <= ANI_ERKEN_GECMIS_SURESI
+            ][-8:]
+
+    def hareket(symbol, uzun=False):
+        gecmis = ANI_ERKEN_GECMIS.get(symbol, [])
+        gereken = 3 if uzun else 2
+        if len(gecmis) < gereken:
+            return None
+        bas = gecmis[-3] if uzun else gecmis[-2]
+        son = gecmis[-1]
+        eski = _ani_sayi(bas.get("fiyat"))
+        yeni = _ani_sayi(son.get("fiyat"))
+        if eski <= 0 or yeni <= 0:
+            return None
+        return _pct(yeni, eski)
+
+    btc10 = hareket("BTCTRY", False) or 0.0
+    btc20 = hareket("BTCTRY", True)
+    piyasa10 = []
+    piyasa20 = []
+    for symbol in coin_haritasi:
+        h10 = hareket(symbol, False)
+        h20 = hareket(symbol, True)
+        if h10 is not None:
+            piyasa10.append(h10)
+        if h20 is not None:
+            piyasa20.append(h20)
+    piyasa10_medyan = statistics.median(piyasa10) if piyasa10 else 0.0
+    piyasa20_medyan = statistics.median(piyasa20) if piyasa20 else 0.0
+
+    for symbol, coin in coin_haritasi.items():
+        gecmis = ANI_ERKEN_GECMIS.get(symbol, [])
+        if len(gecmis) < 2:
+            continue
+        if simdi - float(ANI_ERKEN_SON_MESAJ.get(symbol, 0) or 0) < ANI_ERKEN_SOGUMA:
+            continue
+        if symbol in AL_TAKIP or symbol in IZLE_TAKIP:
+            continue
+
+        d10 = hareket(symbol, False)
+        d20 = hareket(symbol, True)
+        if d10 is None:
+            continue
+        toplam_hareket = d20 if d20 is not None else d10
+        if not (ANI_ERKEN_MIN_HAREKET <= toplam_hareket <= ANI_ERKEN_MAX_HAREKET):
+            continue
+
+        piyasa_ref = piyasa20_medyan if d20 is not None else piyasa10_medyan
+        btc_ref = (btc20 if btc20 is not None else btc10) or 0.0
+        rel_btc = toplam_hareket - btc_ref
+        rel_piyasa = toplam_hareket - piyasa_ref
+
+        bid = _ani_sayi(coin.get("bid"))
+        ask = _ani_sayi(coin.get("ask"))
+        fiyat = _ani_sayi(coin.get("last"))
+        spread = ((ask - bid) / bid * 100.0) if bid > 0 and ask >= bid else None
+        spread_uygun = spread is None or spread <= ANI_ERKEN_MAX_SPREAD
+        if not spread_uygun:
+            continue
+
+        onceki_adim = 0.0
+        ivme = 0.0
+        hacim_pulse = 0.0
+        if len(gecmis) >= 3:
+            p0 = _ani_sayi(gecmis[-3].get("fiyat"))
+            p1 = _ani_sayi(gecmis[-2].get("fiyat"))
+            onceki_adim = _pct(p1, p0) if p0 > 0 and p1 > 0 else 0.0
+            ivme = d10 - onceki_adim
+            v0 = _ani_sayi(gecmis[-3].get("hacim"))
+            v1 = _ani_sayi(gecmis[-2].get("hacim"))
+            v2 = _ani_sayi(gecmis[-1].get("hacim"))
+            onceki_hacim = max(v1 - v0, 0.0)
+            son_hacim = max(v2 - v1, 0.0)
+            if onceki_hacim > 0:
+                hacim_pulse = son_hacim / onceki_hacim
+
+        # 10 saniyelik çok erken yol ve 20 saniyelik ivme teyitli yol.
+        hizli_yol = bool(
+            d20 is None
+            and ANI_ERKEN_HIZLI_MIN <= d10 <= 0.90
+            and rel_btc >= 0.20
+            and rel_piyasa >= 0.20
+            and (spread is None or spread <= 0.35)
+        )
+        puan = 0
+        puan += 2 if toplam_hareket >= 0.25 else 1
+        puan += 1 if d10 >= 0.08 else 0
+        puan += 1 if ivme >= 0.03 else 0
+        puan += 1 if rel_btc >= ANI_ERKEN_MIN_REL else 0
+        puan += 1 if rel_piyasa >= ANI_ERKEN_MIN_REL else 0
+        puan += 1 if hacim_pulse >= 1.50 else 0
+        puan += 1 if spread is not None and spread <= 0.35 else 0
+        teyitli_yol = bool(
+            d20 is not None
+            and d10 >= 0.08
+            and onceki_adim >= -0.03
+            and (ivme >= 0.03 or hacim_pulse >= 1.50)
+            and rel_btc >= ANI_ERKEN_MIN_REL
+            and rel_piyasa >= ANI_ERKEN_MIN_REL
+            and puan >= 5
+        )
+        if not (hizli_yol or teyitli_yol):
+            continue
+
+        gorunen = symbol[:-3]
+        spread_txt = f"%{spread:.2f}" if spread is not None else "veri yok"
+        hacim_txt = f"{hacim_pulse:.2f}x" if hacim_pulse > 0 else "ilk ölçüm"
+        mesaj = (
+            f"⚡ ANİ HAREKET — ERKEN ADAY\n"
+            f"{kalin_coin_yazisi(gorunen)}\n"
+            f"💰 Fiyat: {_ani_fiyat_yaz(fiyat)}\n"
+            f"🚀 10sn: %{d10:+.2f} | 20sn: %{toplam_hareket:+.2f}\n"
+            f"📊 BTC farkı: %{rel_btc:+.2f} | Piyasa farkı: %{rel_piyasa:+.2f}\n"
+            f"🔥 Hacim akışı: {hacim_txt} | Spread: {spread_txt}\n"
+            f"✅ Hareket henüz %{ANI_ERKEN_MAX_HAREKET:.2f} sınırını geçmedi.\n"
+            "Not: AL emri değil; 1 dakikalık mum kapanmadan gelen erken takip uyarısıdır."
+        )
+        print(mesaj)
+        if telegram_gonder(mesaj):
+            ANI_ERKEN_SON_MESAJ[symbol] = simdi
+            izle_takip_baslat({
+                "symbol": symbol,
+                "fiyat": fiyat,
+                "izle_kaynak": "ANİ ERKEN",
+            })
+
+
 # Railway deploy / yeniden baslatma kontrolu: Telegram baglantisini aninda dogrula.
-telegram_gonder("✅ V11 Erken+Devam başladı ve aktif. Tek bot taramaya başlıyor.")
+telegram_gonder(
+    "✅ V11 Erken+Devam başladı ve aktif.\n"
+    "⚡ Ani Hareket Erken Aday: 10 sn takip açık."
+)
 
 while True:
     try:
@@ -4286,6 +4489,9 @@ while True:
         )
         ticker_response.raise_for_status()
         ticker = ticker_response.json().get("data", [])
+
+        # Ana 60 sn taramadan bağımsız 10 sn erken hareket hafızasını besle.
+        ani_hareket_erken_guncelle(ticker)
 
         # Mevcut ticker cevabını öğrenme katmanında da kullan; ekstra API isteği yok.
         al_ogrenme_guncelle(ticker)
@@ -5959,16 +6165,19 @@ while True:
             time.sleep(sure)
             beklenen += sure
 
-            if AL_TAKIP or IZLE_TAKIP or giris_zamani_deneyi_aktif_mi() or top10_hizli_aktif_mi():
-                try:
-                    r = requests.get("https://api.btcturk.com/api/v2/ticker", timeout=10)
-                    r.raise_for_status()
-                    _ara_ticker = r.json().get("data", [])
+            # Ani Hareket Erken Aday katmanı her 10 sn çalışır. Diğer takipler
+            # varsa aynı ticker cevabını paylaşır; ek istek oluşturmaz.
+            try:
+                r = requests.get("https://api.btcturk.com/api/v2/ticker", timeout=10)
+                r.raise_for_status()
+                _ara_ticker = r.json().get("data", [])
+                ani_hareket_erken_guncelle(_ara_ticker)
+                if AL_TAKIP or IZLE_TAKIP or giris_zamani_deneyi_aktif_mi() or top10_hizli_aktif_mi():
                     al_takip_guncelle(_ara_ticker)
                     giris_zamani_deneyi_guncelle(_ara_ticker)
                     top10_hizli_fiyat_guncelle(_ara_ticker)
-                except Exception as e:
-                    print("Kâr/giriş zamanı takip hatası:", e)
+            except Exception as e:
+                print("Ani hareket/kâr takip hatası:", e)
 
     except Exception as e:
         print("Bot genel hata:", e)
