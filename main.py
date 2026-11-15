@@ -42,8 +42,30 @@ ANI_ERKEN_MAX_HAREKET = 1.35
 ANI_ERKEN_MIN_REL = 0.15
 ANI_ERKEN_MAX_SPREAD = 0.60
 ANI_ERKEN_SOGUMA = 30 * 60
+ANI_ERKEN_MIN_ORNEK = 3
+ANI_ERKEN_MIN_ORNEK_ARALIGI = 7
+ANI_ERKEN_GLOBAL_PENCERE = 5 * 60
+ANI_ERKEN_GLOBAL_MESAJ_LIMITI = 2
 ANI_ERKEN_GECMIS = {}
 ANI_ERKEN_SON_MESAJ = {}
+ANI_ERKEN_GLOBAL_MESAJLAR = []
+
+# Pump Öncesi Birikim V1
+# Ticker yalnız ön eleme yapar. En güçlü en fazla üç adayın halka açık
+# orderbook + son işlemleri 30 saniyede bir incelenir. Fiyat sıçramışsa mesaj
+# verilmez; yalnız alış derinliği ve işlem baskısı birlikte güçlüyse konuşur.
+BIRIKIM_DERIN_TARAMA_ARALIGI = 30
+BIRIKIM_MAX_DERIN_ADAY = 3
+BIRIKIM_MIN_SKOR = 70
+BIRIKIM_MIN_DERINLIK_ORANI = 1.60
+BIRIKIM_MIN_ISLEM_BASKISI = 0.58
+BIRIKIM_MAX_FIYAT_HAREKETI = 0.80
+BIRIKIM_MAX_FIYAT_ARALIGI = 1.20
+BIRIKIM_MAX_SPREAD = 0.50
+BIRIKIM_SOGUMA = 2 * 60 * 60
+BIRIKIM_SON_DERIN_TARAMA = 0.0
+BIRIKIM_SON_MESAJ = {}
+BIRIKIM_KAYITLARI = []
 
 # Early Capture V1: önceki taramadaki hızlanmayı ölçmek için hafıza.
 onceki_tarama = {}
@@ -92,6 +114,10 @@ _AL_DEFAULT_DIR = _RAILWAY_VOLUME if _RAILWAY_VOLUME else ("/data" if os.path.is
 AL_OGRENME_DOSYA = os.getenv("AL_OGRENME_DOSYA", os.path.join(_AL_DEFAULT_DIR, "al_ogrenme_rejim.json"))
 AL_TAKIP_DOSYA = os.getenv("AL_TAKIP_DOSYA", os.path.join(_AL_DEFAULT_DIR, "v11_al_takip.json"))
 IZLE_TAKIP_DOSYA = os.getenv("IZLE_TAKIP_DOSYA", os.path.join(_AL_DEFAULT_DIR, "v11_izle_hedef_takip.json"))
+BIRIKIM_OGRENME_DOSYA = os.getenv(
+    "BIRIKIM_OGRENME_DOSYA",
+    os.path.join(_AL_DEFAULT_DIR, "v11_pump_oncesi_birikim.json"),
+)
 AL_OGRENME_SURESI = 3 * 60 * 60
 REJIM_RAPOR_ARALIGI = 24 * 60 * 60
 SON_REJIM_RAPOR_ZAMANI = time.time()
@@ -1403,6 +1429,7 @@ def yuzde5_basariraporu_gerekirse_gonder():
         "geçmek zorundadır. Parçalı/sönen momentum ve birleşik zayıflık ayrıca ayıklanır."
     )
 
+    birikim_raporu = _birikim_rapor_metni()
     mesaj = (
         f"📊 3 GÜNLÜK +%{V11_RAPOR_BASARI_ESIGI:g} / YANLIŞ SİNYAL RAPORU — {YUZDE5_RAPOR_ETIKETI}\n\n"
         f"Tamamlanan sinyal: {len(tamam)}\n"
@@ -1416,6 +1443,7 @@ def yuzde5_basariraporu_gerekirse_gonder():
         f"📉 Ortalama dip getiri: %{ort_dip:+.2f}\n"
         f"⏳ Henüz tamamlanmayan: {len(acik)}"
         f"{filtre_metni}\n\n"
+        f"{birikim_raporu}"
         f"Not: Başarı = AL sonrası 3 saat içinde en az +%{V11_RAPOR_BASARI_ESIGI:g} tepe. "
         f"Yanlış = +%{V11_RAPOR_BASARI_ESIGI:g} görmeden en az -%2.5 ters hareket."
     )
@@ -4300,8 +4328,10 @@ def ani_hareket_erken_guncelle(ticker):
     beklemez; fiyat ivmesi, BTC/piyasa ayrışması, spread ve varsa hacim akışını
     birlikte kullanır. Hareket %1.35'i geçtiyse artık erken sayılmaz.
     """
+    global ANI_ERKEN_GLOBAL_MESAJLAR
     simdi = time.time()
     coin_haritasi = {}
+    mesaj_adaylari = []
 
     for coin in ticker:
         symbol = str(coin.get("pair", "") or "")
@@ -4318,6 +4348,10 @@ def ani_hareket_erken_guncelle(ticker):
         hacim = _ani_sayi(coin.get("volume"))
         coin_haritasi[symbol] = coin
         gecmis = ANI_ERKEN_GECMIS.setdefault(symbol, [])
+        # Aynı ticker'ın birkaç saniye içinde iki kez işlenmesi sahte 10/20sn
+        # hareketi üretmesin; her örnek gerçekten ayrı bir taramadan gelsin.
+        if gecmis and simdi - float(gecmis[-1].get("ts", 0) or 0) < ANI_ERKEN_MIN_ORNEK_ARALIGI:
+            continue
         gecmis.append({"ts": simdi, "fiyat": fiyat, "hacim": hacim})
         ANI_ERKEN_GECMIS[symbol] = [
             x for x in gecmis
@@ -4330,7 +4364,11 @@ def ani_hareket_erken_guncelle(ticker):
         btc_fiyat = _ani_sayi(btc_coin.get("last"))
         if btc_fiyat > 0:
             btc_gecmis = ANI_ERKEN_GECMIS.setdefault("BTCTRY", [])
-            btc_gecmis.append({"ts": simdi, "fiyat": btc_fiyat, "hacim": 0.0})
+            if (
+                not btc_gecmis
+                or simdi - float(btc_gecmis[-1].get("ts", 0) or 0) >= ANI_ERKEN_MIN_ORNEK_ARALIGI
+            ):
+                btc_gecmis.append({"ts": simdi, "fiyat": btc_fiyat, "hacim": 0.0})
             ANI_ERKEN_GECMIS["BTCTRY"] = [
                 x for x in btc_gecmis
                 if simdi - float(x.get("ts", 0) or 0) <= ANI_ERKEN_GECMIS_SURESI
@@ -4365,7 +4403,9 @@ def ani_hareket_erken_guncelle(ticker):
 
     for symbol, coin in coin_haritasi.items():
         gecmis = ANI_ERKEN_GECMIS.get(symbol, [])
-        if len(gecmis) < 2:
+        # İlk/ikinci ölçüm Telegram üretmez. En az 20 saniyelik üç ayrı örnek
+        # olmadan fiyat ivmesi ve hacim akışı güvenilir değildir.
+        if len(gecmis) < ANI_ERKEN_MIN_ORNEK:
             continue
         if simdi - float(ANI_ERKEN_SON_MESAJ.get(symbol, 0) or 0) < ANI_ERKEN_SOGUMA:
             continue
@@ -4374,9 +4414,9 @@ def ani_hareket_erken_guncelle(ticker):
 
         d10 = hareket(symbol, False)
         d20 = hareket(symbol, True)
-        if d10 is None:
+        if d10 is None or d20 is None:
             continue
-        toplam_hareket = d20 if d20 is not None else d10
+        toplam_hareket = d20
         if not (ANI_ERKEN_MIN_HAREKET <= toplam_hareket <= ANI_ERKEN_MAX_HAREKET):
             continue
 
@@ -4396,6 +4436,7 @@ def ani_hareket_erken_guncelle(ticker):
         onceki_adim = 0.0
         ivme = 0.0
         hacim_pulse = 0.0
+        hacim_gecerli = False
         if len(gecmis) >= 3:
             p0 = _ani_sayi(gecmis[-3].get("fiyat"))
             p1 = _ani_sayi(gecmis[-2].get("fiyat"))
@@ -4408,13 +4449,19 @@ def ani_hareket_erken_guncelle(ticker):
             son_hacim = max(v2 - v1, 0.0)
             if onceki_hacim > 0:
                 hacim_pulse = son_hacim / onceki_hacim
+                hacim_gecerli = son_hacim > 0
+
+        # "İlk ölçüm" artık hiçbir koşulda ani hareket mesajı üretemez.
+        if not hacim_gecerli:
+            continue
 
         # 10 saniyelik çok erken yol ve 20 saniyelik ivme teyitli yol.
         hizli_yol = bool(
-            d20 is None
-            and ANI_ERKEN_HIZLI_MIN <= d10 <= 0.90
-            and rel_btc >= 0.20
-            and rel_piyasa >= 0.20
+            ANI_ERKEN_HIZLI_MIN <= toplam_hareket <= 0.90
+            and d10 >= 0.12
+            and rel_btc >= 0.25
+            and rel_piyasa >= 0.25
+            and hacim_pulse >= 2.00
             and (spread is None or spread <= 0.35)
         )
         puan = 0
@@ -4426,10 +4473,10 @@ def ani_hareket_erken_guncelle(ticker):
         puan += 1 if hacim_pulse >= 1.50 else 0
         puan += 1 if spread is not None and spread <= 0.35 else 0
         teyitli_yol = bool(
-            d20 is not None
-            and d10 >= 0.08
+            d10 >= 0.08
             and onceki_adim >= -0.03
-            and (ivme >= 0.03 or hacim_pulse >= 1.50)
+            and hacim_pulse >= 1.50
+            and (ivme >= 0.03 or hacim_pulse >= 2.00)
             and rel_btc >= ANI_ERKEN_MIN_REL
             and rel_piyasa >= ANI_ERKEN_MIN_REL
             and puan >= 5
@@ -4439,7 +4486,7 @@ def ani_hareket_erken_guncelle(ticker):
 
         gorunen = symbol[:-3]
         spread_txt = f"%{spread:.2f}" if spread is not None else "veri yok"
-        hacim_txt = f"{hacim_pulse:.2f}x" if hacim_pulse > 0 else "ilk ölçüm"
+        hacim_txt = f"{hacim_pulse:.2f}x"
         mesaj = (
             f"⚡ ANİ HAREKET — ERKEN ADAY\n"
             f"{kalin_coin_yazisi(gorunen)}\n"
@@ -4450,20 +4497,396 @@ def ani_hareket_erken_guncelle(ticker):
             f"✅ Hareket henüz %{ANI_ERKEN_MAX_HAREKET:.2f} sınırını geçmedi.\n"
             "Not: AL emri değil; 1 dakikalık mum kapanmadan gelen erken takip uyarısıdır."
         )
-        print(mesaj)
-        if telegram_gonder(mesaj):
+        mesaj_adaylari.append({
+            "symbol": symbol,
+            "fiyat": fiyat,
+            "mesaj": mesaj,
+            "puan": puan,
+            "hareket": toplam_hareket,
+            "hacim_pulse": hacim_pulse,
+        })
+
+    # Piyasa topluca oynadığında onlarca bildirim yerine yalnız en güçlü iki
+    # adayı seç. Limit bütün taramalar için ortak 5 dakikalık penceredir.
+    ANI_ERKEN_GLOBAL_MESAJLAR = [
+        ts for ts in ANI_ERKEN_GLOBAL_MESAJLAR
+        if simdi - float(ts or 0) < ANI_ERKEN_GLOBAL_PENCERE
+    ]
+    kalan_kota = max(
+        ANI_ERKEN_GLOBAL_MESAJ_LIMITI - len(ANI_ERKEN_GLOBAL_MESAJLAR),
+        0,
+    )
+    if kalan_kota <= 0:
+        return
+
+    mesaj_adaylari.sort(
+        key=lambda x: (
+            int(x.get("puan", 0) or 0),
+            float(x.get("hacim_pulse", 0) or 0),
+            float(x.get("hareket", 0) or 0),
+        ),
+        reverse=True,
+    )
+    for aday in mesaj_adaylari[:kalan_kota]:
+        print(aday["mesaj"])
+        if telegram_gonder(aday["mesaj"]):
+            symbol = aday["symbol"]
             ANI_ERKEN_SON_MESAJ[symbol] = simdi
+            ANI_ERKEN_GLOBAL_MESAJLAR.append(simdi)
             izle_takip_baslat({
                 "symbol": symbol,
-                "fiyat": fiyat,
+                "fiyat": aday["fiyat"],
                 "izle_kaynak": "ANİ ERKEN",
             })
+
+
+def _birikim_yukle():
+    try:
+        if os.path.exists(BIRIKIM_OGRENME_DOSYA):
+            with open(BIRIKIM_OGRENME_DOSYA, "r", encoding="utf-8") as f:
+                veri = json.load(f)
+            return veri if isinstance(veri, list) else []
+    except Exception as e:
+        print("Birikim öğrenme dosyası okunamadı:", e)
+    return []
+
+
+def _birikim_kaydet():
+    try:
+        klasor = os.path.dirname(os.path.abspath(BIRIKIM_OGRENME_DOSYA))
+        if klasor:
+            os.makedirs(klasor, exist_ok=True)
+        gecici = f"{BIRIKIM_OGRENME_DOSYA}.{os.getpid()}.tmp"
+        with open(gecici, "w", encoding="utf-8") as f:
+            json.dump(BIRIKIM_KAYITLARI[-3000:], f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(gecici, BIRIKIM_OGRENME_DOSYA)
+    except Exception as e:
+        print("Birikim öğrenme dosyası yazılamadı:", e)
+
+
+def _birikim_kayit_baslat(symbol, fiyat, skor, metrikler):
+    BIRIKIM_KAYITLARI.append({
+        "symbol": symbol,
+        "zaman": time.time(),
+        "giris": float(fiyat),
+        "skor": int(skor),
+        "max_getiri": 0.0,
+        "min_getiri": 0.0,
+        "tamamlandi": False,
+        "derinlik_orani": round(float(metrikler.get("derinlik_orani", 0) or 0), 3),
+        "islem_baskisi": round(float(metrikler.get("islem_baskisi", 0) or 0), 4),
+        "hacim_pulse": round(float(metrikler.get("hacim_pulse", 0) or 0), 3),
+        "spread": round(float(metrikler.get("spread", 0) or 0), 4),
+    })
+    del BIRIKIM_KAYITLARI[:-3000]
+    _birikim_kaydet()
+
+
+def _birikim_sonuc_guncelle(ticker):
+    fiyatlar = {}
+    for coin in ticker:
+        symbol = str(coin.get("pair", "") or "")
+        fiyat = _ani_sayi(coin.get("last"))
+        if symbol and fiyat > 0:
+            fiyatlar[symbol] = fiyat
+    simdi = time.time()
+    degisti = False
+    for kayit in BIRIKIM_KAYITLARI:
+        if kayit.get("tamamlandi"):
+            continue
+        baslangic = float(kayit.get("zaman", simdi) or simdi)
+        giris = float(kayit.get("giris", 0) or 0)
+        fiyat = float(fiyatlar.get(str(kayit.get("symbol", "")), 0) or 0)
+        if giris > 0 and fiyat > 0:
+            getiri = _pct(fiyat, giris)
+            yeni_max = max(float(kayit.get("max_getiri", 0) or 0), getiri)
+            yeni_min = min(float(kayit.get("min_getiri", 0) or 0), getiri)
+            if yeni_max != kayit.get("max_getiri") or yeni_min != kayit.get("min_getiri"):
+                kayit["max_getiri"] = round(yeni_max, 4)
+                kayit["min_getiri"] = round(yeni_min, 4)
+                degisti = True
+        if simdi - baslangic >= AL_OGRENME_SURESI:
+            kayit["tamamlandi"] = True
+            kayit["tamamlanma_zamani"] = simdi
+            degisti = True
+    if degisti:
+        _birikim_kaydet()
+
+
+def _birikim_rapor_metni():
+    alt_sinir = time.time() - YUZDE5_RAPOR_ARALIGI
+    kayitlar = [
+        k for k in BIRIKIM_KAYITLARI
+        if float(k.get("zaman", 0) or 0) >= alt_sinir
+    ]
+    tamam = [k for k in kayitlar if k.get("tamamlandi")]
+    acik = [k for k in kayitlar if not k.get("tamamlandi")]
+    def oran(esik):
+        return (
+            sum(1 for k in tamam if float(k.get("max_getiri", 0) or 0) >= esik)
+            / len(tamam) * 100.0
+        ) if tamam else 0.0
+    yanlis = (
+        sum(
+            1 for k in tamam
+            if float(k.get("max_getiri", 0) or 0) < 3.0
+            and float(k.get("min_getiri", 0) or 0) <= -2.5
+        ) / len(tamam) * 100.0
+    ) if tamam else 0.0
+    return (
+        "🧲 PUMP ÖNCESİ BİRİKİM — 3 SAATLİK SONUÇ\n"
+        f"• Tamamlanan={len(tamam)} | bekleyen={len(acik)} | "
+        f"+%3 %{oran(3):.1f} | +%5 %{oran(5):.1f} | +%10 %{oran(10):.1f} | "
+        f"yanlış %{yanlis:.1f}\n"
+        "• Emir defteri/işlem baskısı uyarısıdır; V11 AL kararını değiştirmez.\n\n"
+    )
+
+
+def _birikim_orderbook_ozet(symbol):
+    r = requests.get(
+        "https://api.btcturk.com/api/v2/orderbook",
+        params={"pairSymbol": symbol, "limit": 10},
+        timeout=5,
+    )
+    r.raise_for_status()
+    veri = (r.json() or {}).get("data") or {}
+    bids = veri.get("bids") or []
+    asks = veri.get("asks") or []
+    if not bids or not asks:
+        return None
+
+    def seviye(sev):
+        if isinstance(sev, (list, tuple)) and len(sev) >= 2:
+            return _ani_sayi(sev[0]), _ani_sayi(sev[1])
+        if isinstance(sev, dict):
+            return (
+                _ani_sayi(sev.get("price", sev.get("P"))),
+                _ani_sayi(sev.get("amount", sev.get("A"))),
+            )
+        return 0.0, 0.0
+
+    bid_sev = [seviye(x) for x in bids[:10]]
+    ask_sev = [seviye(x) for x in asks[:10]]
+    bid_try = sum(p * a for p, a in bid_sev if p > 0 and a > 0)
+    ask_try = sum(p * a for p, a in ask_sev if p > 0 and a > 0)
+    best_bid, best_bid_adet = bid_sev[0]
+    best_ask, best_ask_adet = ask_sev[0]
+    if bid_try <= 0 or ask_try <= 0 or best_bid <= 0 or best_ask <= 0:
+        return None
+    return {
+        "derinlik_orani": bid_try / ask_try,
+        "tepe_orani": (best_bid_adet / best_ask_adet) if best_ask_adet > 0 else 0.0,
+        "spread": ((best_ask - best_bid) / best_bid) * 100.0,
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "orta": (best_bid + best_ask) / 2.0,
+    }
+
+
+def _birikim_islem_ozet(symbol, orta):
+    r = requests.get(
+        "https://api.btcturk.com/api/v2/trades",
+        params={"pairSymbol": symbol, "last": 30},
+        timeout=5,
+    )
+    r.raise_for_status()
+    islemler = (r.json() or {}).get("data") or []
+    if len(islemler) < 5:
+        return None
+    islemler = sorted(islemler, key=lambda x: _ani_sayi(x.get("date")))
+    son_tarih = max((_ani_sayi(x.get("date")) for x in islemler), default=0.0)
+    if son_tarih > 0 and time.time() - son_tarih / 1000.0 > 60:
+        return None
+
+    alis_try = 0.0
+    satis_try = 0.0
+    onceki_fiyat = None
+    son_yon = 0
+    for islem in islemler:
+        fiyat = _ani_sayi(islem.get("price"))
+        adet = _ani_sayi(islem.get("amount"))
+        if fiyat <= 0 or adet <= 0:
+            continue
+        if onceki_fiyat is None:
+            yon = 1 if fiyat >= orta else -1
+        elif fiyat > onceki_fiyat:
+            yon = 1
+        elif fiyat < onceki_fiyat:
+            yon = -1
+        else:
+            yon = son_yon or (1 if fiyat >= orta else -1)
+        tutar = fiyat * adet
+        if yon > 0:
+            alis_try += tutar
+        else:
+            satis_try += tutar
+        onceki_fiyat = fiyat
+        son_yon = yon
+    toplam = alis_try + satis_try
+    if toplam <= 0:
+        return None
+    return {
+        "islem_baskisi": alis_try / toplam,
+        "islem_tutari": toplam,
+        "islem_sayisi": len(islemler),
+    }
+
+
+def birikim_on_alarm_guncelle(ticker):
+    """Fiyat sıçramadan önce orderbook + işlem akışı birikimini arar."""
+    global BIRIKIM_SON_DERIN_TARAMA
+    _birikim_sonuc_guncelle(ticker)
+    simdi = time.time()
+    if simdi - BIRIKIM_SON_DERIN_TARAMA < BIRIKIM_DERIN_TARAMA_ARALIGI:
+        return
+    BIRIKIM_SON_DERIN_TARAMA = simdi
+
+    on_adaylar = []
+    for coin in ticker:
+        symbol = str(coin.get("pair", "") or "")
+        if (
+            not symbol.endswith("TRY")
+            or symbol == "BTCTRY"
+            or stable_coin_mi(symbol)
+            or symbol in AL_TAKIP
+            or symbol in IZLE_TAKIP
+            or simdi - float(BIRIKIM_SON_MESAJ.get(symbol, 0) or 0) < BIRIKIM_SOGUMA
+        ):
+            continue
+        gecmis = ANI_ERKEN_GECMIS.get(symbol, [])
+        if len(gecmis) < 3:
+            continue
+        fiyatlar = [_ani_sayi(x.get("fiyat")) for x in gecmis if _ani_sayi(x.get("fiyat")) > 0]
+        if len(fiyatlar) < 3:
+            continue
+        fiyat = fiyatlar[-1]
+        hareket = _pct(fiyat, fiyatlar[-3])
+        fiyat_araligi = _pct(max(fiyatlar), min(fiyatlar)) if min(fiyatlar) > 0 else 999.0
+        if not (-0.40 <= hareket <= BIRIKIM_MAX_FIYAT_HAREKETI):
+            continue
+        if fiyat_araligi > BIRIKIM_MAX_FIYAT_ARALIGI:
+            continue
+
+        bid = _ani_sayi(coin.get("bid"))
+        ask = _ani_sayi(coin.get("ask"))
+        spread = ((ask - bid) / bid * 100.0) if bid > 0 and ask >= bid else 999.0
+        if spread > BIRIKIM_MAX_SPREAD:
+            continue
+
+        v0 = _ani_sayi(gecmis[-3].get("hacim"))
+        v1 = _ani_sayi(gecmis[-2].get("hacim"))
+        v2 = _ani_sayi(gecmis[-1].get("hacim"))
+        onceki_hacim = max(v1 - v0, 0.0)
+        son_hacim = max(v2 - v1, 0.0)
+        hacim_pulse = (
+            son_hacim / onceki_hacim
+            if onceki_hacim > 0
+            else (3.0 if son_hacim > 0 else 0.0)
+        )
+        bid_adet = _ani_sayi(coin.get("bidAmount", coin.get("BA")))
+        ask_adet = _ani_sayi(coin.get("askAmount", coin.get("AA")))
+        ticker_oran = bid_adet / ask_adet if ask_adet > 0 else 0.0
+        if son_hacim <= 0 and ticker_oran < 1.40:
+            continue
+        if hacim_pulse < 1.20 and ticker_oran < 1.40:
+            continue
+
+        sira_puani = min(hacim_pulse, 10.0) * 2.0 + min(ticker_oran, 10.0) * 3.0
+        sira_puani += min((son_hacim * fiyat) / 10000.0, 5.0)
+        on_adaylar.append({
+            "symbol": symbol,
+            "fiyat": fiyat,
+            "hareket": hareket,
+            "fiyat_araligi": fiyat_araligi,
+            "hacim_pulse": hacim_pulse,
+            "ticker_oran": ticker_oran,
+            "spread": spread,
+            "sira_puani": sira_puani,
+        })
+
+    on_adaylar.sort(key=lambda x: x.get("sira_puani", 0), reverse=True)
+    for aday in on_adaylar[:BIRIKIM_MAX_DERIN_ADAY]:
+        symbol = aday["symbol"]
+        try:
+            kitap = _birikim_orderbook_ozet(symbol)
+            if not kitap or float(kitap.get("derinlik_orani", 0) or 0) < 1.30:
+                continue
+            islemler = _birikim_islem_ozet(symbol, float(kitap.get("orta", 0) or 0))
+            if not islemler:
+                continue
+
+            derinlik = float(kitap.get("derinlik_orani", 0) or 0)
+            tepe_orani = float(kitap.get("tepe_orani", 0) or 0)
+            islem_baskisi = float(islemler.get("islem_baskisi", 0) or 0)
+            hacim_pulse = float(aday.get("hacim_pulse", 0) or 0)
+            spread = float(kitap.get("spread", aday.get("spread", 999)) or 999)
+
+            skor = 0
+            if derinlik >= 1.60: skor += 25
+            if derinlik >= 2.20: skor += 10
+            if tepe_orani >= 1.30: skor += 10
+            if tepe_orani >= 1.80: skor += 10
+            if islem_baskisi >= 0.58: skor += 15
+            if islem_baskisi >= 0.68: skor += 10
+            if hacim_pulse >= 1.20: skor += 10
+            if hacim_pulse >= 2.00: skor += 10
+            if spread <= 0.30: skor += 5
+            if float(aday.get("fiyat_araligi", 999) or 999) <= 0.80: skor += 10
+            skor = min(skor, 100)
+
+            guclu = bool(
+                skor >= BIRIKIM_MIN_SKOR
+                and derinlik >= BIRIKIM_MIN_DERINLIK_ORANI
+                and islem_baskisi >= BIRIKIM_MIN_ISLEM_BASKISI
+                and tepe_orani >= 1.30
+                and spread <= BIRIKIM_MAX_SPREAD
+                and (hacim_pulse >= 1.20 or float(aday.get("ticker_oran", 0) or 0) >= 1.40)
+            )
+            if not guclu:
+                continue
+
+            gorunen = symbol[:-3]
+            mesaj = (
+                "🧲 PUMP ÖNCESİ BİRİKİM — GÜÇLÜ\n"
+                f"{kalin_coin_yazisi(gorunen)}\n"
+                f"💰 Fiyat: {_ani_fiyat_yaz(float(aday['fiyat']))}\n"
+                f"🎯 Birikim Skoru: {skor}/100\n"
+                f"📚 Alış/Satış derinliği: {derinlik:.2f}x | İlk kademe: {tepe_orani:.2f}x\n"
+                f"🟢 İşlem baskısı: %{islem_baskisi * 100:.1f} alıcı yönlü\n"
+                f"🔥 Hacim akışı: {hacim_pulse:.2f}x | Spread: %{spread:.2f}\n"
+                f"⏱️ Fiyat hareketi: %{float(aday['hareket']):+.2f} | Aralık: %{float(aday['fiyat_araligi']):.2f}\n"
+                "✅ Fiyat henüz sıçramadı; alış birikimi önden güçleniyor.\n"
+                "Not: AL emri değil; pump öncesi takip uyarısıdır."
+            )
+            print(mesaj)
+            if telegram_gonder(mesaj):
+                BIRIKIM_SON_MESAJ[symbol] = simdi
+                metrikler = dict(aday)
+                metrikler.update({
+                    "derinlik_orani": derinlik,
+                    "islem_baskisi": islem_baskisi,
+                    "spread": spread,
+                })
+                _birikim_kayit_baslat(symbol, aday["fiyat"], skor, metrikler)
+                izle_takip_baslat({
+                    "symbol": symbol,
+                    "fiyat": aday["fiyat"],
+                    "izle_kaynak": "PUMP ÖNCESİ BİRİKİM",
+                })
+        except Exception as e:
+            print(f"Birikim derin analiz hatası ({symbol}):", e)
+
+
+BIRIKIM_KAYITLARI.extend(_birikim_yukle())
 
 
 # Railway deploy / yeniden baslatma kontrolu: Telegram baglantisini aninda dogrula.
 telegram_gonder(
     "✅ V11 Erken+Devam başladı ve aktif.\n"
-    "⚡ Ani Hareket Erken Aday: 10 sn takip açık."
+    "⚡ Ani Hareket Erken Aday: 10 sn takip açık.\n"
+    "🧲 Pump Öncesi Birikim: emir defteri + işlem akışı açık."
 )
 
 while True:
@@ -4492,6 +4915,7 @@ while True:
 
         # Ana 60 sn taramadan bağımsız 10 sn erken hareket hafızasını besle.
         ani_hareket_erken_guncelle(ticker)
+        birikim_on_alarm_guncelle(ticker)
 
         # Mevcut ticker cevabını öğrenme katmanında da kullan; ekstra API isteği yok.
         al_ogrenme_guncelle(ticker)
@@ -6172,6 +6596,7 @@ while True:
                 r.raise_for_status()
                 _ara_ticker = r.json().get("data", [])
                 ani_hareket_erken_guncelle(_ara_ticker)
+                birikim_on_alarm_guncelle(_ara_ticker)
                 if AL_TAKIP or IZLE_TAKIP or giris_zamani_deneyi_aktif_mi() or top10_hizli_aktif_mi():
                     al_takip_guncelle(_ara_ticker)
                     giris_zamani_deneyi_guncelle(_ara_ticker)
