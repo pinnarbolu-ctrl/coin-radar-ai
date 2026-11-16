@@ -36,32 +36,39 @@ SON_PIYASA_MEDYAN_60 = 0.0  # Son tam taramadaki TRY coinleri 60dk medyanı
 # uyarı üretir. Aynı coin 30 dakika içinde tekrar konuşmaz.
 ANI_ERKEN_TARAMA_SURESI = 10
 ANI_ERKEN_GECMIS_SURESI = 75
-ANI_ERKEN_MIN_HAREKET = 0.20
-ANI_ERKEN_HIZLI_MIN = 0.30
-ANI_ERKEN_MAX_HAREKET = 1.35
-ANI_ERKEN_MIN_REL = 0.15
-ANI_ERKEN_MAX_SPREAD = 0.60
-ANI_ERKEN_SOGUMA = 30 * 60
+ANI_ERKEN_MIN_HAREKET = 0.30
+ANI_ERKEN_HIZLI_MIN = 0.40
+ANI_ERKEN_MAX_HAREKET = 1.25
+ANI_ERKEN_MIN_REL = 0.20
+ANI_ERKEN_MAX_SPREAD = 0.35
+ANI_ERKEN_MIN_HACIM_PULSE = 1.50
+ANI_ERKEN_MIN_PUAN = 6
+ANI_ERKEN_SOGUMA = 60 * 60
 ANI_ERKEN_MIN_ORNEK = 3
 ANI_ERKEN_MIN_ORNEK_ARALIGI = 7
 ANI_ERKEN_GLOBAL_PENCERE = 5 * 60
-ANI_ERKEN_GLOBAL_MESAJ_LIMITI = 2
+ANI_ERKEN_GLOBAL_MESAJ_LIMITI = 1
+ANI_EMIR_MAX_DERIN_ADAY = 3
+ANI_EMIR_MIN_TEYIT_SKORU = 60
+ANI_EMIR_MIN_DERINLIK = 1.10
+ANI_EMIR_MIN_TEPE_ORANI = 0.80
+ANI_EMIR_MIN_ISLEM_BASKISI = 0.55
 ANI_ERKEN_GECMIS = {}
 ANI_ERKEN_SON_MESAJ = {}
 ANI_ERKEN_GLOBAL_MESAJLAR = []
 
-# Pump Öncesi Birikim V1
-# Ticker yalnız ön eleme yapar. En güçlü en fazla üç adayın halka açık
-# orderbook + son işlemleri 30 saniyede bir incelenir. Fiyat sıçramışsa mesaj
-# verilmez; yalnız alış derinliği ve işlem baskısı birlikte güçlüyse konuşur.
+# Eski Pump Öncesi Birikim karşılaştırma kaydı.
+# Ayrı Telegram mesajı kapalıdır; orderbook + işlem akışı artık yalnız
+# Ani Hareket adaylarının seçici teyidinde kullanılır.
+BIRIKIM_TELEGRAM_AKTIF = False
 BIRIKIM_DERIN_TARAMA_ARALIGI = 30
 BIRIKIM_MAX_DERIN_ADAY = 3
-BIRIKIM_MIN_SKOR = 70
-BIRIKIM_MIN_DERINLIK_ORANI = 1.60
-BIRIKIM_MIN_ISLEM_BASKISI = 0.58
+BIRIKIM_MIN_SKOR = 80
+BIRIKIM_MIN_DERINLIK_ORANI = 2.00
+BIRIKIM_MIN_ISLEM_BASKISI = 0.65
 BIRIKIM_MAX_FIYAT_HAREKETI = 0.80
 BIRIKIM_MAX_FIYAT_ARALIGI = 1.20
-BIRIKIM_MAX_SPREAD = 0.50
+BIRIKIM_MAX_SPREAD = 0.35
 BIRIKIM_SOGUMA = 2 * 60 * 60
 BIRIKIM_SON_DERIN_TARAMA = 0.0
 BIRIKIM_SON_MESAJ = {}
@@ -4403,7 +4410,7 @@ def ani_hareket_erken_guncelle(ticker):
 
     for symbol, coin in coin_haritasi.items():
         gecmis = ANI_ERKEN_GECMIS.get(symbol, [])
-        # İlk/ikinci ölçüm Telegram üretmez. En az 20 saniyelik üç ayrı örnek
+        # İlk iki ölçüm Telegram üretmez. En az 20 saniyelik üç ayrı örnek
         # olmadan fiyat ivmesi ve hacim akışı güvenilir değildir.
         if len(gecmis) < ANI_ERKEN_MIN_ORNEK:
             continue
@@ -4455,14 +4462,16 @@ def ani_hareket_erken_guncelle(ticker):
         if not hacim_gecerli:
             continue
 
-        # 10 saniyelik çok erken yol ve 20 saniyelik ivme teyitli yol.
+        # Yalnız olağan dışı hareketler: yüksek göreceli hız, gerçek hacim
+        # sıçraması ve dar spread birlikte bulunmadan mesaj üretilmez.
         hizli_yol = bool(
             ANI_ERKEN_HIZLI_MIN <= toplam_hareket <= 0.90
             and d10 >= 0.12
-            and rel_btc >= 0.25
-            and rel_piyasa >= 0.25
+            and rel_btc >= 0.30
+            and rel_piyasa >= 0.30
             and hacim_pulse >= 2.00
-            and (spread is None or spread <= 0.35)
+            and spread is not None
+            and spread <= 0.25
         )
         puan = 0
         puan += 2 if toplam_hareket >= 0.25 else 1
@@ -4473,40 +4482,33 @@ def ani_hareket_erken_guncelle(ticker):
         puan += 1 if hacim_pulse >= 1.50 else 0
         puan += 1 if spread is not None and spread <= 0.35 else 0
         teyitli_yol = bool(
-            d10 >= 0.08
-            and onceki_adim >= -0.03
-            and hacim_pulse >= 1.50
-            and (ivme >= 0.03 or hacim_pulse >= 2.00)
+            toplam_hareket >= ANI_ERKEN_MIN_HAREKET
+            and d10 >= 0.08
+            and onceki_adim >= 0.00
+            and hacim_pulse >= ANI_ERKEN_MIN_HACIM_PULSE
+            and (ivme >= 0.00 or hacim_pulse >= 2.50)
             and rel_btc >= ANI_ERKEN_MIN_REL
             and rel_piyasa >= ANI_ERKEN_MIN_REL
-            and puan >= 5
+            and spread is not None
+            and spread <= ANI_ERKEN_MAX_SPREAD
+            and puan >= ANI_ERKEN_MIN_PUAN
         )
         if not (hizli_yol or teyitli_yol):
             continue
 
-        gorunen = symbol[:-3]
-        spread_txt = f"%{spread:.2f}" if spread is not None else "veri yok"
-        hacim_txt = f"{hacim_pulse:.2f}x"
-        mesaj = (
-            f"⚡ ANİ HAREKET — ERKEN ADAY\n"
-            f"{kalin_coin_yazisi(gorunen)}\n"
-            f"💰 Fiyat: {_ani_fiyat_yaz(fiyat)}\n"
-            f"🚀 10sn: %{d10:+.2f} | 20sn: %{toplam_hareket:+.2f}\n"
-            f"📊 BTC farkı: %{rel_btc:+.2f} | Piyasa farkı: %{rel_piyasa:+.2f}\n"
-            f"🔥 Hacim akışı: {hacim_txt} | Spread: {spread_txt}\n"
-            f"✅ Hareket henüz %{ANI_ERKEN_MAX_HAREKET:.2f} sınırını geçmedi.\n"
-            "Not: AL emri değil; 1 dakikalık mum kapanmadan gelen erken takip uyarısıdır."
-        )
         mesaj_adaylari.append({
             "symbol": symbol,
             "fiyat": fiyat,
-            "mesaj": mesaj,
             "puan": puan,
             "hareket": toplam_hareket,
+            "d10": d10,
+            "rel_btc": rel_btc,
+            "rel_piyasa": rel_piyasa,
             "hacim_pulse": hacim_pulse,
+            "ticker_spread": spread,
         })
 
-    # Piyasa topluca oynadığında onlarca bildirim yerine yalnız en güçlü iki
+    # Piyasa topluca oynadığında onlarca bildirim yerine yalnız en güçlü tek
     # adayı seç. Limit bütün taramalar için ortak 5 dakikalık penceredir.
     ANI_ERKEN_GLOBAL_MESAJLAR = [
         ts for ts in ANI_ERKEN_GLOBAL_MESAJLAR
@@ -4527,16 +4529,49 @@ def ani_hareket_erken_guncelle(ticker):
         ),
         reverse=True,
     )
-    for aday in mesaj_adaylari[:kalan_kota]:
-        print(aday["mesaj"])
-        if telegram_gonder(aday["mesaj"]):
+    gonderilen = 0
+    # En güçlü fiyat adaylarından en fazla üçünün emir defteri + son işlem
+    # akışı incelenir. Böylece zayıf bir orderbook yüzünden ilk aday elenirse
+    # sıradaki güçlü aday teyit şansı bulur; API yükü yine sınırlı kalır.
+    for aday in mesaj_adaylari[:ANI_EMIR_MAX_DERIN_ADAY]:
+        if gonderilen >= kalan_kota:
+            break
+        teyit = ani_emir_defteri_teyidi(aday)
+        if not teyit or not bool(teyit.get("uygun")):
+            print(
+                f"[ANİ/EMİR DEFTERİ GÖLGE] {aday['symbol']} | "
+                f"{(teyit or {}).get('neden', 'teyit verisi yok')}"
+            )
+            continue
+
+        symbol = aday["symbol"]
+        gorunen = symbol[:-3]
+        mesaj = (
+            "⚡ ANİ HAREKET — EMİR DEFTERİ TEYİTLİ\n"
+            f"{kalin_coin_yazisi(gorunen)}\n"
+            f"💰 Fiyat: {_ani_fiyat_yaz(float(aday['fiyat']))}\n"
+            f"🎯 Teyit Skoru: {int(teyit['skor'])}/100\n"
+            f"🚀 10sn: %{float(aday['d10']):+.2f} | 20sn: %{float(aday['hareket']):+.2f}\n"
+            f"📊 BTC farkı: %{float(aday['rel_btc']):+.2f} | "
+            f"Piyasa farkı: %{float(aday['rel_piyasa']):+.2f}\n"
+            f"🔥 Hacim akışı: {float(aday['hacim_pulse']):.2f}x | "
+            f"Spread: %{float(teyit['spread']):.2f}\n"
+            f"📚 Alış/Satış derinliği: {float(teyit['derinlik_orani']):.2f}x | "
+            f"İlk kademe: {float(teyit['tepe_orani']):.2f}x\n"
+            f"🟢 Son işlem alıcı baskısı: %{float(teyit['islem_baskisi']) * 100:.1f}\n"
+            "✅ Fiyat hareketi emir defteri ve işlem akışıyla teyit edildi.\n"
+            "Not: AL emri değil; seçici erken takip uyarısıdır."
+        )
+        print(mesaj)
+        if telegram_gonder(mesaj):
             symbol = aday["symbol"]
             ANI_ERKEN_SON_MESAJ[symbol] = simdi
             ANI_ERKEN_GLOBAL_MESAJLAR.append(simdi)
+            gonderilen += 1
             izle_takip_baslat({
                 "symbol": symbol,
                 "fiyat": aday["fiyat"],
-                "izle_kaynak": "ANİ ERKEN",
+                "izle_kaynak": "ANİ ERKEN + EMİR DEFTERİ",
             })
 
 
@@ -4640,7 +4675,7 @@ def _birikim_rapor_metni():
         f"• Tamamlanan={len(tamam)} | bekleyen={len(acik)} | "
         f"+%3 %{oran(3):.1f} | +%5 %{oran(5):.1f} | +%10 %{oran(10):.1f} | "
         f"yanlış %{yanlis:.1f}\n"
-        "• Emir defteri/işlem baskısı uyarısıdır; V11 AL kararını değiştirmez.\n\n"
+        "• Eski karşılaştırma kayıtlarıdır; ayrı Birikim Telegram mesajı artık kapalıdır.\n\n"
     )
 
 
@@ -4734,10 +4769,83 @@ def _birikim_islem_ozet(symbol, orta):
     }
 
 
+def ani_emir_defteri_teyidi(aday):
+    """Ani fiyat hareketini orderbook ve gerçekleşen işlemlerle doğrular.
+
+    Emir defteri tek başına sinyal değildir. Fiyat/hacim motorunun seçtiği en
+    güçlü adayda alış derinliği, ilk kademe, spread ve son işlemlerin yönü
+    birlikte olumluysa Telegram'a izin verir. Veri eksik veya nötrse aday
+    yalnız gölgede kalır.
+    """
+    symbol = str(aday.get("symbol", "") or "")
+    if not symbol:
+        return {"uygun": False, "neden": "sembol yok"}
+    try:
+        kitap = _birikim_orderbook_ozet(symbol)
+        if not kitap:
+            return {"uygun": False, "neden": "emir defteri verisi yok"}
+        islemler = _birikim_islem_ozet(
+            symbol,
+            float(kitap.get("orta", 0) or 0),
+        )
+        if not islemler:
+            return {"uygun": False, "neden": "güncel işlem akışı yok"}
+
+        derinlik = float(kitap.get("derinlik_orani", 0) or 0)
+        tepe_orani = float(kitap.get("tepe_orani", 0) or 0)
+        spread = float(kitap.get("spread", 999) or 999)
+        islem_baskisi = float(islemler.get("islem_baskisi", 0) or 0)
+
+        skor = 0
+        if derinlik >= ANI_EMIR_MIN_DERINLIK: skor += 20
+        if derinlik >= 1.50: skor += 10
+        if tepe_orani >= ANI_EMIR_MIN_TEPE_ORANI: skor += 10
+        if tepe_orani >= 1.20: skor += 10
+        if islem_baskisi >= ANI_EMIR_MIN_ISLEM_BASKISI: skor += 20
+        if islem_baskisi >= 0.65: skor += 10
+        if spread <= ANI_ERKEN_MAX_SPREAD: skor += 10
+        if spread <= 0.25: skor += 10
+        skor = min(skor, 100)
+
+        uygun = bool(
+            skor >= ANI_EMIR_MIN_TEYIT_SKORU
+            and derinlik >= ANI_EMIR_MIN_DERINLIK
+            and tepe_orani >= ANI_EMIR_MIN_TEPE_ORANI
+            and islem_baskisi >= ANI_EMIR_MIN_ISLEM_BASKISI
+            and spread <= ANI_ERKEN_MAX_SPREAD
+        )
+        eksikler = []
+        if derinlik < ANI_EMIR_MIN_DERINLIK:
+            eksikler.append(f"derinlik {derinlik:.2f}x")
+        if tepe_orani < ANI_EMIR_MIN_TEPE_ORANI:
+            eksikler.append(f"ilk kademe {tepe_orani:.2f}x")
+        if islem_baskisi < ANI_EMIR_MIN_ISLEM_BASKISI:
+            eksikler.append(f"alıcı baskısı %{islem_baskisi * 100:.1f}")
+        if spread > ANI_ERKEN_MAX_SPREAD:
+            eksikler.append(f"spread %{spread:.2f}")
+        if skor < ANI_EMIR_MIN_TEYIT_SKORU:
+            eksikler.append(f"teyit skoru {skor}")
+
+        return {
+            "uygun": uygun,
+            "neden": "uygun" if uygun else ", ".join(eksikler),
+            "skor": skor,
+            "derinlik_orani": derinlik,
+            "tepe_orani": tepe_orani,
+            "islem_baskisi": islem_baskisi,
+            "spread": spread,
+        }
+    except Exception as e:
+        print(f"Ani hareket emir defteri teyit hatası ({symbol}):", e)
+        return {"uygun": False, "neden": "teyit sorgusu başarısız"}
+
+
 def birikim_on_alarm_guncelle(ticker):
-    """Fiyat sıçramadan önce orderbook + işlem akışı birikimini arar."""
+    """Eski açık birikim kayıtlarını sonuçlandırır; yeni mesaj üretmez."""
     global BIRIKIM_SON_DERIN_TARAMA
     _birikim_sonuc_guncelle(ticker)
+    if not BIRIKIM_TELEGRAM_AKTIF:
+        return
     simdi = time.time()
     if simdi - BIRIKIM_SON_DERIN_TARAMA < BIRIKIM_DERIN_TARAMA_ARALIGI:
         return
@@ -4840,9 +4948,10 @@ def birikim_on_alarm_guncelle(ticker):
                 skor >= BIRIKIM_MIN_SKOR
                 and derinlik >= BIRIKIM_MIN_DERINLIK_ORANI
                 and islem_baskisi >= BIRIKIM_MIN_ISLEM_BASKISI
-                and tepe_orani >= 1.30
+                and tepe_orani >= 1.50
                 and spread <= BIRIKIM_MAX_SPREAD
-                and (hacim_pulse >= 1.20 or float(aday.get("ticker_oran", 0) or 0) >= 1.40)
+                and hacim_pulse >= 1.50
+                and float(aday.get("ticker_oran", 0) or 0) >= 1.40
             )
             if not guclu:
                 continue
@@ -4885,8 +4994,8 @@ BIRIKIM_KAYITLARI.extend(_birikim_yukle())
 # Railway deploy / yeniden baslatma kontrolu: Telegram baglantisini aninda dogrula.
 telegram_gonder(
     "✅ V11 Erken+Devam başladı ve aktif.\n"
-    "⚡ Ani Hareket Erken Aday: 10 sn takip açık.\n"
-    "🧲 Pump Öncesi Birikim: emir defteri + işlem akışı açık."
+    "⚡ Ani Hareket: fiyat + hacim + emir defteri teyidi açık.\n"
+    "🔕 Ayrı Pump Öncesi Birikim mesajı kapalı."
 )
 
 while True:
