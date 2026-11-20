@@ -53,6 +53,12 @@ ANI_EMIR_MIN_TEYIT_SKORU = 60
 ANI_EMIR_MIN_DERINLIK = 1.10
 ANI_EMIR_MIN_TEPE_ORANI = 0.80
 ANI_EMIR_MIN_ISLEM_BASKISI = 0.55
+ANI_UST_MIN_TEYIT_SKORU = 100
+ANI_UST_MIN_HACIM_PULSE = 5.00
+ANI_UST_MIN_ISLEM_BASKISI = 0.70
+ANI_UST_MIN_HAREKET = 0.40
+ANI_UST_MIN_DERINLIK = 1.30
+ANI_UST_MAX_SPREAD = 0.25
 ANI_ERKEN_GECMIS = {}
 ANI_ERKEN_SON_MESAJ = {}
 ANI_ERKEN_GLOBAL_MESAJLAR = []
@@ -179,6 +185,15 @@ V11_TEKRAR_YENI_HAREKET = 1.5
 V11_GEC_D5_MAX = 3.0
 V11_GEC_D10_MAX = 4.5
 V11_GEC_RSI_MAX = 72.0
+# Son 3 günlük raporda eski Güçlü AL sınıfı +%3'te %20 başarı ve %80 yanlış
+# üretti. Bu nedenle yeni Güçlü AL adayları canlı AL sayılmaz; İZLE olarak
+# ölçülür. Buna karşılık eski "geç teyit" grubu, emir anlamı taşımayan ayrı
+# Güçlü Devam Teyidi mesajına dönüştürülür. Bu kapı özellikle sabit False'tur:
+# Railway'de kalmış eski bir ortam değişkeni sınıfı yeniden canlıya açamaz.
+V11_GUCLU_AL_CANLI_AKTIF = False
+V11_GUCLU_DEVAM_MESAJ_AKTIF = os.getenv("V11_GUCLU_DEVAM_MESAJ_AKTIF", "1") == "1"
+V11_GUCLU_DEVAM_HEDEFLERI = (3.0, 5.0)
+V11_CANLI_SURUM_ETIKETI = "DEVAM-TEYIT-V2"
 V11_UST_DUZEY_ERKEN_MIN = 60
 V11_SEVIYE2_AI_MIN = 90.0
 V11_SEVIYE2_DEVAM_MIN = 80.0
@@ -541,6 +556,7 @@ def _top10_kapi_etiketi(kayit):
         "yumusa_filtre": "yumuşak filtre eledi",
         "tekrar_koruma": "tekrar koruması",
         "gec_teyit": "geç teyit",
+        "guclu_devam": "Güçlü Devam Teyidi",
         "telegram_izle": "Telegram İZLE",
         "telegram_al": "Telegram AL",
     }.get(asama, asama or "neden kaydedilemedi")
@@ -1280,10 +1296,18 @@ def yuzde5_basariraporu_gerekirse_gonder():
         x for x in tum
         if x.get("tamamlandi") and bool(x.get("v11_filtre_adayi"))
     ]
+    guclu_devam_tamam = [
+        x for x in filtre_tamam
+        if str(x.get("kayit_tipi", "")) == "v11_guclu_devam"
+        or bool(x.get("v11_guclu_devam_mesaji"))
+    ]
     gec_teyit_tamam = [
         x for x in filtre_tamam
-        if str(x.get("kayit_tipi", "")) == "v11_gec_teyit"
-        or bool(x.get("v11_gec_teyit"))
+        if (
+            str(x.get("kayit_tipi", "")) == "v11_gec_teyit"
+            or bool(x.get("v11_gec_teyit"))
+        )
+        and x not in guclu_devam_tamam
     ]
     izle_tum_tamam = [
         x for x in filtre_tamam
@@ -1293,8 +1317,13 @@ def yuzde5_basariraporu_gerekirse_gonder():
     kontrollu_erken_tamam = [
         x for x in izle_tum_tamam if bool(x.get("v11_kontrollu_erken_al"))
     ]
+    guclu_al_izle_tamam = [
+        x for x in izle_tum_tamam if bool(x.get("v11_guclu_al_izle"))
+    ]
     erken_izle_tamam = [
-        x for x in izle_tum_tamam if not bool(x.get("v11_kontrollu_erken_al"))
+        x for x in izle_tum_tamam
+        if not bool(x.get("v11_kontrollu_erken_al"))
+        and not bool(x.get("v11_guclu_al_izle"))
     ]
     kontrollu_ust_tamam = [
         x for x in filtre_tamam if bool(x.get("v11_kontrollu_ust_duzey"))
@@ -1314,6 +1343,7 @@ def yuzde5_basariraporu_gerekirse_gonder():
         x for x in filtre_tamam
         if bool(x.get("v11_filtre_kabul"))
         and x not in gec_teyit_tamam
+        and x not in guclu_devam_tamam
         and x not in izle_tum_tamam
     ]
     filtre_veto = [x for x in filtre_tamam if not bool(x.get("v11_filtre_kabul"))]
@@ -1353,7 +1383,8 @@ def yuzde5_basariraporu_gerekirse_gonder():
     seviye_gruplari = [
         ("🛡️ Kontrollü Üst Düzey AL", kontrollu_ust_tamam),
         ("🏆 Üst Düzey AL", seviye1_tamam),
-        ("💎 Güçlü AL", seviye2_tamam),
+        ("🔕 Önceki Güçlü AL", seviye2_tamam),
+        ("🌱 Eski Güçlü AL Profili/İzle", guclu_al_izle_tamam),
         ("🛡️ Kontrollü Erken AL", kontrollu_erken_tamam),
         ("🌱 İzle", erken_izle_tamam),
     ]
@@ -1381,16 +1412,22 @@ def yuzde5_basariraporu_gerekirse_gonder():
         f"+%3 %{_hedef_orani(filtre_veto, 3):.1f} | +%5 %{_hedef_orani(filtre_veto, 5):.1f}\n"
         f"• Kabul dağılımı: canlı AL={len(canli_al_tamam)} | "
         f"Kontrollü Erken={len(kontrollu_erken_tamam)} | "
-        f"İZLE={len(erken_izle_tamam)} | geç teyit={len(gec_teyit_tamam)}\n"
-        "\n⏱️ V11 GİRİŞ ZAMANI KORUMASI\n"
-        f"• Geç teyit: n={len(gec_teyit_tamam)} | "
+        f"İZLE={len(erken_izle_tamam)} | Güçlü profilden İZLE={len(guclu_al_izle_tamam)} | "
+        f"Güçlü Devam={len(guclu_devam_tamam)}\n"
+        "\n🚀 V11 GÜÇLÜ DEVAM TEYİDİ\n"
+        f"• Canlı bilgi mesajı: n={len(guclu_devam_tamam)} | "
+        f"+%2 %{_hedef_orani(guclu_devam_tamam, 2):.1f} | "
+        f"+%3 %{_hedef_orani(guclu_devam_tamam, 3):.1f} | "
+        f"+%5 %{_hedef_orani(guclu_devam_tamam, 5):.1f} | "
+        f"yanlış %{_yanlis_orani(guclu_devam_tamam):.1f}\n"
+        f"• Önceki geç teyit/gölge: n={len(gec_teyit_tamam)} | "
         f"+%2 %{_hedef_orani(gec_teyit_tamam, 2):.1f} | "
         f"+%3 %{_hedef_orani(gec_teyit_tamam, 3):.1f} | "
         f"+%5 %{_hedef_orani(gec_teyit_tamam, 5):.1f} | "
         f"yanlış %{_yanlis_orani(gec_teyit_tamam):.1f}\n"
         f"• Koruma: 5dk >%{V11_GEC_D5_MAX:.1f} veya "
         f"10dk >%{V11_GEC_D10_MAX:.1f} veya RSI >{V11_GEC_RSI_MAX:.0f}; "
-        "Telegram'a gönderilmez; gölgede ölçülür.\n"
+        "AL/SAT emri değildir; +%3 ve +%5 sonuçları ayrıca ölçülür.\n"
         "\n🧭 V11 MESAJ SINIFLARI — +%3 KARŞILAŞTIRMASI\n"
         f"• 🛡️ Kontrollü Üst Düzey AL: n={len(kontrollu_ust_tamam)} | "
         f"+%2 %{_hedef_orani(kontrollu_ust_tamam, 2):.1f} | "
@@ -1402,11 +1439,16 @@ def yuzde5_basariraporu_gerekirse_gonder():
         f"+%3 %{_hedef_orani(seviye1_tamam, 3):.1f} | "
         f"+%5 %{_hedef_orani(seviye1_tamam, 5):.1f} | "
         f"yanlış %{_yanlis_orani(seviye1_tamam):.1f}\n"
-        f"• 💎 Güçlü AL: n={len(seviye2_tamam)} | "
+        f"• 🔕 Önceki Güçlü AL: n={len(seviye2_tamam)} | "
         f"+%2 %{_hedef_orani(seviye2_tamam, 2):.1f} | "
         f"+%3 %{_hedef_orani(seviye2_tamam, 3):.1f} | "
         f"+%5 %{_hedef_orani(seviye2_tamam, 5):.1f} | "
         f"yanlış %{_yanlis_orani(seviye2_tamam):.1f}\n"
+        f"• 🌱 Eski Güçlü AL Profili/İzle: n={len(guclu_al_izle_tamam)} | "
+        f"+%2 %{_hedef_orani(guclu_al_izle_tamam, 2):.1f} | "
+        f"+%3 %{_hedef_orani(guclu_al_izle_tamam, 3):.1f} | "
+        f"+%5 %{_hedef_orani(guclu_al_izle_tamam, 5):.1f} | "
+        f"yanlış %{_yanlis_orani(guclu_al_izle_tamam):.1f}\n"
         f"• 🛡️ Kontrollü Erken AL: n={len(kontrollu_erken_tamam)} | "
         f"+%3 %{_hedef_orani(kontrollu_erken_tamam, 3):.1f} | "
         f"+%6 %{_hedef_orani(kontrollu_erken_tamam, 6):.1f} | "
@@ -1418,7 +1460,7 @@ def yuzde5_basariraporu_gerekirse_gonder():
         f"+%5 %{_hedef_orani(erken_izle_tamam, 5):.1f} | "
         f"yanlış %{_yanlis_orani(erken_izle_tamam):.1f}\n"
         f"{uc_lider_metni}"
-        "• Kalıcı +%3 lideri için beş grupta da en az 8 tamamlanmış sinyal beklenir; "
+        "• Kalıcı +%3 lideri için sınıflarda en az 8 tamamlanmış sinyal beklenir; "
         "ölçüm canlı kararı otomatik değiştirmez.\n"
         "• Erken Yakalama puanı tek başına geç kalma vetosu değildir; "
         "zamanlama gerçek 5/10dk hareketi ve RSI ile, kalite ayrı puanlarla ölçülür.\n"
@@ -2060,15 +2102,22 @@ def _izle_takip_kaydet():
 
 
 def izle_takip_baslat(aday):
-    """İZLE/Kontrollü Erken mesajını üç saat +%3/+%6/+%10 takip eder."""
+    """İZLE mesajını üç saat; kaynağına özel hedef basamaklarıyla takip eder."""
     symbol = str(aday.get("symbol", "") or "")
     fiyat = float(aday.get("fiyat", 0) or 0)
     if not symbol or fiyat <= 0:
         return
 
+    kaynak = str(aday.get("izle_kaynak", "") or "")
+    hedef_esikleri = tuple(
+        float(x) for x in (aday.get("izle_hedef_esikleri") or HEDEF_BILDIR_ESIKLERI)
+    )
     mevcut = IZLE_TAKIP.get(symbol)
     if mevcut and mevcut.get("aktif"):
-        return
+        # Aynı coin önce İZLE, sonra Güçlü Devam Teyidi aldıysa eski takibi
+        # yükselt; hedefler teyit fiyatından yeniden ve ayrı kaynakla ölçülsün.
+        if kaynak != "V11 GÜÇLÜ DEVAM":
+            return
 
     IZLE_TAKIP[symbol] = {
         "aktif": True,
@@ -2077,7 +2126,8 @@ def izle_takip_baslat(aday):
         "bildirilen_esikler": [],
         "baslangic_zamani": time.time(),
         "kontrollu_erken_al": bool(aday.get("v11_kontrollu_erken_al")),
-        "kaynak": str(aday.get("izle_kaynak", "") or ""),
+        "kaynak": kaynak,
+        "hedef_esikleri": list(hedef_esikleri),
     }
     _izle_takip_kaydet()
 
@@ -2132,7 +2182,7 @@ def _izle_takip_ogrenmeden_tamamla():
 
 
 def izle_takip_guncelle(fiyatlar):
-    """🌱 İZLE fiyatından +%3/+%6/+%10 görülünce basamak mesajı yollar."""
+    """İZLE kaynağına özel hedef görülünce basamak mesajı yollar."""
     simdi = time.time()
     degisti = False
     for symbol, p in IZLE_TAKIP.items():
@@ -2154,7 +2204,10 @@ def izle_takip_guncelle(fiyatlar):
         bildirilen = {
             float(x) for x in (p.get("bildirilen_esikler") or [])
         }
-        for esik in HEDEF_BILDIR_ESIKLERI:
+        hedef_esikleri = tuple(
+            float(x) for x in (p.get("hedef_esikleri") or HEDEF_BILDIR_ESIKLERI)
+        )
+        for esik in hedef_esikleri:
             if getiri < esik or esik in bildirilen:
                 continue
             kontrollu = bool(p.get("kontrollu_erken_al"))
@@ -2179,7 +2232,7 @@ def izle_takip_guncelle(fiyatlar):
             p["hedef_bildirildi"] = True
             _izle_hedef_ogrenmede_isaretle(symbol, baslangic, esik)
             degisti = True
-            if esik >= max(HEDEF_BILDIR_ESIKLERI):
+            if esik >= max(hedef_esikleri):
                 p["aktif"] = False
 
     if degisti:
@@ -2448,6 +2501,8 @@ def al_ogrenme_baslat(
         "v11_momentum_pozitif_sayisi": int(aday.get("v11_momentum_pozitif_sayisi", 0) or 0),
         "v11_gec_teyit": bool(aday.get("v11_gec_teyit")),
         "v11_gec_teyit_nedenleri": list(aday.get("v11_gec_teyit_nedenleri", [])),
+        "v11_guclu_devam_mesaji": bool(aday.get("v11_guclu_devam_mesaji")),
+        "v11_guclu_al_izle": bool(aday.get("v11_guclu_al_izle")),
         "v11_seviye": int(aday.get("v11_seviye", 0) or 0),
         "v11_kontrollu_ust_duzey": bool(aday.get("v11_kontrollu_ust_duzey")),
         "v11_kontrollu_erken_al": bool(aday.get("v11_kontrollu_erken_al")),
@@ -4546,8 +4601,21 @@ def ani_hareket_erken_guncelle(ticker):
 
         symbol = aday["symbol"]
         gorunen = symbol[:-3]
+        ust_duzey = bool(
+            int(teyit.get("skor", 0) or 0) >= ANI_UST_MIN_TEYIT_SKORU
+            and float(aday.get("hacim_pulse", 0) or 0) >= ANI_UST_MIN_HACIM_PULSE
+            and float(teyit.get("islem_baskisi", 0) or 0) >= ANI_UST_MIN_ISLEM_BASKISI
+            and float(aday.get("hareket", 0) or 0) >= ANI_UST_MIN_HAREKET
+            and float(teyit.get("derinlik_orani", 0) or 0) >= ANI_UST_MIN_DERINLIK
+            and float(teyit.get("spread", 999) or 999) <= ANI_UST_MAX_SPREAD
+        )
+        sinif_basligi = (
+            "🏆 ANİ HAREKET — ÜST DÜZEY"
+            if ust_duzey else "⚡ ANİ HAREKET — TEYİTLİ"
+        )
+        takip_kaynagi = "ANİ ÜST DÜZEY" if ust_duzey else "ANİ TEYİTLİ"
         mesaj = (
-            "⚡ ANİ HAREKET — EMİR DEFTERİ TEYİTLİ\n"
+            f"{sinif_basligi}\n"
             f"{kalin_coin_yazisi(gorunen)}\n"
             f"💰 Fiyat: {_ani_fiyat_yaz(float(aday['fiyat']))}\n"
             f"🎯 Teyit Skoru: {int(teyit['skor'])}/100\n"
@@ -4571,7 +4639,7 @@ def ani_hareket_erken_guncelle(ticker):
             izle_takip_baslat({
                 "symbol": symbol,
                 "fiyat": aday["fiyat"],
-                "izle_kaynak": "ANİ ERKEN + EMİR DEFTERİ",
+                "izle_kaynak": takip_kaynagi,
             })
 
 
@@ -4994,6 +5062,7 @@ BIRIKIM_KAYITLARI.extend(_birikim_yukle())
 # Railway deploy / yeniden baslatma kontrolu: Telegram baglantisini aninda dogrula.
 telegram_gonder(
     "✅ V11 Erken+Devam başladı ve aktif.\n"
+    f"🧾 Sürüm: {V11_CANLI_SURUM_ETIKETI} | Güçlü AL → İZLE\n"
     "⚡ Ani Hareket: fiyat + hacim + emir defteri teyidi açık.\n"
     "🔕 Ayrı Pump Öncesi Birikim mesajı kapalı."
 )
@@ -6491,6 +6560,9 @@ while True:
                         and float(a.get("devam_gucu", 0) or 0) >= V11_SEVIYE2_DEVAM_MIN
                         and float(a.get("radar_skoru", 0) or 0) >= V11_SEVIYE2_RADAR_MIN
                     )
+                    a["v11_guclu_al_izle"] = bool(
+                        _seviye2 and not V11_GUCLU_AL_CANLI_AKTIF
+                    )
 
                     # KONTROLLÜ ERKEN AL
                     # Normalde İZLE kalacak adaylardan; MELANIA/BARD örneklerinde
@@ -6557,16 +6629,19 @@ while True:
 
                     if _gec_teyit:
                         _seviye = 0
-                        _seviye_basligi = "⚠️ GEÇ TEYİT — ALMA / OTOMATİK EMİR YOK\n"
+                        _seviye_basligi = "🚀 GÜÇLÜ DEVAM TEYİDİ\n"
                     elif _kontrollu_ust_duzey:
                         _seviye = 1
                         _seviye_basligi = "🛡️ KONTROLLÜ ÜST DÜZEY AL\n"
                     elif _seviye1:
                         _seviye = 1
                         _seviye_basligi = "🏆 ÜST DÜZEY AL\n"
-                    elif _seviye2:
+                    elif _seviye2 and V11_GUCLU_AL_CANLI_AKTIF:
                         _seviye = 2
                         _seviye_basligi = "💎 GÜÇLÜ AL\n"
+                    elif _seviye2:
+                        _seviye = 3
+                        _seviye_basligi = "🌱 İZLE\n"
                     elif _kontrollu_erken_al:
                         # Takip altyapısında İZLE seviyesi korunur; böylece bu
                         # sınıf gerçek emir/AL takibine yanlışlıkla girmez.
@@ -6581,7 +6656,7 @@ while True:
                     _yol_basligi = ""
 
                     if _gec_teyit:
-                        _karar_gorunumu = "⚠️ İZLE / ALMA"
+                        _karar_gorunumu = "🟢 DEVAM TEYİTLİ"
                     elif _kontrollu_erken_al:
                         _karar_gorunumu = "🟢 KONTROLLÜ AL"
                     elif _seviye == 3:
@@ -6589,7 +6664,7 @@ while True:
                     else:
                         _karar_gorunumu = "🟢 AL"
                     _gec_neden_satiri = (
-                        "⏱️ Geç kalma nedeni: " + " • ".join(_gec_nedenleri) + "\n"
+                        "✅ Devam teyidi: " + " • ".join(_gec_nedenleri) + "\n"
                         if _gec_teyit else ""
                     )
 
@@ -6610,20 +6685,37 @@ while True:
                         f"BTC 3s: %{_btc3_anlik:+.2f} | Piyasa 3s: %{_piyasa3_anlik:+.2f}\n"
                         f"EMA: {_ema_yon} | RSI: {_rsi_txt} | ADX: {_adx_txt} | MACD: {_macd_yon}\n\n"
                         f"{neden_alarm}Neden: {_neden_temiz}\n"
+                        + (
+                            "Not: AL/SAT emri değil; hareket devamı bilgilendirmesidir.\n"
+                            if _gec_teyit else ""
+                        )
                     )
 
                     if _gec_teyit:
-                        # Telegram'ı doldurmaz; AL sırasına, +%5 kâr bildirimine
-                        # ve gerçek-emir adaylığına girmez. Gölgede ölçülür.
-                        print(
-                            f"[V11 GEÇ TEYİT/GÖLGE] {symbol} | "
-                            + " • ".join(_gec_nedenleri)
-                        )
+                        # AL sırasına veya gerçek-emir adaylığına girmez. Yalnız
+                        # raporda üstün çıkan devam profilini bilgi mesajı yapar.
+                        a["v11_guclu_devam_mesaji"] = False
+                        _devam_gonderildi = False
+                        if V11_GUCLU_DEVAM_MESAJ_AKTIF:
+                            print(mesaj)
+                            _devam_gonderildi = telegram_gonder(mesaj)
+                            a["v11_guclu_devam_mesaji"] = bool(_devam_gonderildi)
+                            if _devam_gonderildi:
+                                _devam_takip = dict(a)
+                                _devam_takip["izle_kaynak"] = "V11 GÜÇLÜ DEVAM"
+                                _devam_takip["izle_hedef_esikleri"] = V11_GUCLU_DEVAM_HEDEFLERI
+                                izle_takip_baslat(_devam_takip)
+                        else:
+                            print(
+                                f"[V11 GÜÇLÜ DEVAM/GÖLGE] {symbol} | "
+                                + " • ".join(_gec_nedenleri)
+                            )
                         gec_teyitler.append(a)
                         top10_golge_asama_guncelle(
                             symbol,
-                            "gec_teyit",
+                            "guclu_devam" if _devam_gonderildi else "gec_teyit",
                             gec_nedenleri=list(_gec_nedenleri),
+                            telegram_izle=bool(_devam_gonderildi),
                         )
                         continue
                     # Telegram'da yalnız erken Üst Düzey/Güçlü/İzle sınıfları
@@ -6664,8 +6756,8 @@ while True:
                     al_ogrenme_baslat(_a, btc_d, piyasa_fiyatlari, piyasa_medyan3, btc_giris_fiyati)
                     giris_zamani_deneyi_baslat(_a)
 
-                # Geç teyitler yalnız gölgede üç saat ölçülür; ana canlı AL
-                # başarı oranına, +%5 ara mesajına ve gerçek-emir kapısına girmez.
+                # Güçlü Devam bilgi mesajları üç saat ölçülür; ana canlı AL
+                # başarı oranına ve gerçek-emir kapısına girmez.
                 for _a in gec_teyitler:
                     al_ogrenme_baslat(
                         _a,
@@ -6673,7 +6765,11 @@ while True:
                         piyasa_fiyatlari,
                         piyasa_medyan3,
                         btc_giris_fiyati,
-                        kayit_tipi="v11_gec_teyit",
+                        kayit_tipi=(
+                            "v11_guclu_devam"
+                            if bool(_a.get("v11_guclu_devam_mesaji"))
+                            else "v11_gec_teyit"
+                        ),
                     )
 
                 # PUMP benzeri erken fakat düşük kaliteli adaylar kaybolmaz;
